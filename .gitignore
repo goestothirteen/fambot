@@ -1,0 +1,18 @@
+# secrets
+.env
+
+# runtime state
+data/
+backups/
+*.db
+*.db-wal
+*.db-shm
+members.json
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage

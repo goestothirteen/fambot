@@ -1,0 +1,19 @@
+services:
+  fambot:
+    build: .
+    container_name: fambot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Asia/Singapore}
+      DB_PATH: /data/fambot.db
+      MEMBERS_FILE: /data/members.json
+    volumes:
+      - ./data:/data
+    # Host RAM is tight (~1.5G of 1.9G used). Guard against runaway growth.
+    mem_limit: 150m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

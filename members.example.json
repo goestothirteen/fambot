@@ -1,0 +1,10 @@
+{
+  "_comment": "Copy to data/members.json before first run. Seeded into the DB once, on an empty members table. Telegram user_ids are captured later by tapping buttons in /setup - leave them null here.",
+  "members": [
+    { "slug": "dad",  "name": "Dad",  "parent": true,  "kid": false, "driver": true,  "admin": false },
+    { "slug": "mom",  "name": "Mom",  "parent": true,  "kid": false, "driver": false, "admin": false },
+    { "slug": "mark", "name": "Mark", "parent": false, "kid": true,  "driver": true,  "admin": true  },
+    { "slug": "dawn", "name": "Dawn", "parent": false, "kid": true,  "driver": false, "admin": false },
+    { "slug": "luke", "name": "Luke", "parent": false, "kid": true,  "driver": false, "admin": false }
+  ]
+}
