@@ -29,11 +29,11 @@ KIND_LABELS = {"dog_accompany": "Come along on the walk",
 
 
 def reply_keyboard() -> ReplyKeyboardMarkup:
-    """The board. Always at the bottom of the screen, so nobody types anything."""
+    """The board — tucked behind the keyboard icon, shown only when tapped."""
     return ReplyKeyboardMarkup(
         [[KeyboardButton(L_DINNER), KeyboardButton(L_RUSH)],
          [KeyboardButton(L_ROSTER), KeyboardButton(L_HELP)]],
-        resize_keyboard=True, is_persistent=True)
+        resize_keyboard=True, is_persistent=False)
 
 
 def home() -> tuple[str, M]:
