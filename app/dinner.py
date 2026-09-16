@@ -128,6 +128,24 @@ def close_poll(poll_id: int, status: str) -> None:
     db.cancel_jobs("dinner_deadline", poll_id)
 
 
+async def retire_poll_board(bot: Bot, poll_id: int) -> None:
+    """Take down the live vote board so only one dinner board exists at a time.
+
+    Several flows replace the vote board with a *new* group message (a lock
+    confirmation, a cancellation notice, a fresh poll, a deadline board). If we
+    just posted the new one, the old vote board would linger with live buttons -
+    the "stale box" (spec 2.5: one live board per activity). Delete the tracked
+    message and forget its id; a user having already deleted it is fine.
+    """
+    poll = db.q1("SELECT message_id FROM dinner_polls WHERE id = ?", (poll_id,))
+    if poll is None or poll["message_id"] is None:
+        return
+    chat_id = db.group_chat_id()
+    if chat_id is not None:
+        await tg.delete_message(bot, chat_id, poll["message_id"])
+    db.x("UPDATE dinner_polls SET message_id = NULL WHERE id = ?", (poll_id,))
+
+
 async def lock(bot: Bot, poll_id: int, day: str, by_user: int) -> bool:
     """Lock a date in. Guarded so two simultaneous taps cannot double-book."""
     cur = db.x("UPDATE dinner_polls SET status = 'locked', locked_date = ? "
@@ -236,6 +254,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await tg.toast(update, "That vote is already closed.", alert=True)
             return
         await tg.toast(update, "")
+        # The confirm dialog supersedes the vote board; drop it so there is
+        # only one live dinner box while the tapper confirms.
+        await retire_poll_board(bot, poll_id)
         text, markup = boards.dinner_lock_confirm(poll_id, day)
         await tg.send_group(bot, text, markup)
 
@@ -249,6 +270,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     elif action == "kill":
         poll_id = int(parts[2])
         close_poll(poll_id, "cancelled")
+        await retire_poll_board(bot, poll_id)
         await tg.toast(update, "")
         await tg.send_group(bot, boards.dinner_poll_cancelled())
 
@@ -256,6 +278,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         poll_id = int(parts[2])
         poll = db.q1("SELECT * FROM dinner_polls WHERE id = ?", (poll_id,))
         close_poll(poll_id, "expired")
+        await retire_poll_board(bot, poll_id)
         await tg.toast(update, "")
         # Votes reset; the window rolls forward to the days after the old ones.
         nxt = t.parse_date(poll["start_date"]) + timedelta(days=poll["days"])
@@ -263,7 +286,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await open_new(bot, user.id, start)
 
     elif action == "drop":
-        close_poll(int(parts[2]), "cancelled")
+        poll_id = int(parts[2])
+        close_poll(poll_id, "cancelled")
+        await retire_poll_board(bot, poll_id)
         await tg.toast(update, "")
         await tg.send_group(bot, boards.dinner_dropped())
 
@@ -358,6 +383,8 @@ async def _job_deadline(bot: Bot, job) -> None:
     db.cancel_jobs("dinner_nag", poll["id"])
     st = poll_state(poll)
     viable = [d for d in st["days"] if d["viable"]]
+    # The deadline board replaces the live vote board (spec 2.5: one live board).
+    await retire_poll_board(bot, poll["id"])
     if viable:
         # Leave the poll open so the lock buttons still work; nagging stops.
         text, markup = boards.dinner_deadline_viable(poll["id"], viable)

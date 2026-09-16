@@ -276,3 +276,64 @@ async def test_dinner_done_marks_the_event_complete(bot):
     await scheduler.HANDLERS["dinner_done"](bot, job)
     assert db.q1("SELECT status FROM dinner_events WHERE id=?",
                  (event["id"],))["status"] == "done"
+
+
+# --- one live board at a time (stale-box regression) -----------------------
+
+async def test_lock_confirm_retires_the_vote_board(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    day = days_of(pid)[0]
+    await everyone_votes(bot, pid, day)
+    board_id = db.q1("SELECT message_id FROM dinner_polls WHERE id=?", (pid,))["message_id"]
+
+    await dinner.on_callback(fake_update(f"d|lock|{pid}|{day}", IDS["mark"]), ctx(bot))
+
+    # The old vote board is deleted and its id forgotten, so no stale box remains.
+    assert board_id in bot.deleted
+    assert db.q1("SELECT message_id FROM dinner_polls WHERE id=?", (pid,))["message_id"] is None
+
+
+async def test_deadline_board_retires_the_vote_board(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    await everyone_votes(bot, pid, days_of(pid)[0])
+    board_id = db.q1("SELECT message_id FROM dinner_polls WHERE id=?", (pid,))["message_id"]
+    bot.reset()
+
+    job = db.q1("SELECT * FROM jobs WHERE kind='dinner_deadline'")
+    await scheduler.HANDLERS["dinner_deadline"](bot, job)
+
+    assert board_id in bot.deleted
+    assert db.q1("SELECT message_id FROM dinner_polls WHERE id=?", (pid,))["message_id"] is None
+
+
+async def test_extend_retires_old_board_leaving_only_the_new_poll(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    await vote(bot, pid, "dawn", days_of(pid)[0])
+    old_board = db.q1("SELECT message_id FROM dinner_polls WHERE id=?", (pid,))["message_id"]
+    job = db.q1("SELECT * FROM jobs WHERE kind='dinner_deadline'")
+    await scheduler.HANDLERS["dinner_deadline"](bot, job)   # expires -> offers extend
+    bot.reset()
+
+    await dinner.on_callback(fake_update(f"d|ext|{pid}", IDS["mark"]), ctx(bot))
+
+    new_poll = dinner.open_poll()
+    assert new_poll["id"] != pid
+    # Exactly one live board: the old one is gone, only the fresh poll stands.
+    assert db.q1("SELECT message_id FROM dinner_polls WHERE id=?", (pid,))["message_id"] is None
+    assert new_poll["message_id"] is not None
+
+
+async def test_cancel_vote_retires_the_board(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    board_id = db.q1("SELECT message_id FROM dinner_polls WHERE id=?", (pid,))["message_id"]
+    await dinner.on_callback(fake_update(f"d|kill|{pid}", IDS["mark"]), ctx(bot))
+    assert board_id in bot.deleted
+    assert db.q1("SELECT message_id FROM dinner_polls WHERE id=?", (pid,))["message_id"] is None
+
+
+async def test_retire_survives_an_already_deleted_board(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    bot.fail_delete = True          # user already removed the message
+    # Must not raise, and must still forget the id.
+    await dinner.retire_poll_board(bot, pid)
+    assert db.q1("SELECT message_id FROM dinner_polls WHERE id=?", (pid,))["message_id"] is None
