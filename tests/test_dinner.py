@@ -42,8 +42,10 @@ async def test_star_appears_only_at_five_of_five(bot):
     assert not dinner.viable_days(db.q1("SELECT * FROM dinner_polls WHERE id=?", (pid,)))
 
     await vote(bot, pid, "luke", day)
-    assert "⭐" in bot.board
-    assert f"d|lock|{pid}|{day}" in bot.callbacks()
+    # Everyone has now voted, so the live board becomes the finalize prompt.
+    # The unanimous day is still viable and now offered via a finalize button.
+    assert dinner.viable_days(db.q1("SELECT * FROM dinner_polls WHERE id=?", (pid,))) == [day]
+    assert f"d|fin|{pid}|{day}" in bot.callbacks()
 
 
 async def test_vote_toggles_off_again(bot):
@@ -244,10 +246,13 @@ async def test_unregistered_member_blocks_five_of_five(bot, unregister_all):
     unregister_all("luke")
     pid = await dinner.open_new(bot, IDS["mark"])
     day = days_of(pid)[0]
-    for slug in ["dad", "mom", "mark", "dawn"]:
+    for slug in ["dad", "mom", "mark"]:
         await vote(bot, pid, slug, day)
+    # Still someone to hear from, so the vote board shows and warns about 5/5.
     assert "⭐" not in bot.board
     assert "Not registered" in bot.board
+    # Nobody is ever "viable" because required counts the unregistered member.
+    assert not dinner.viable_days(db.q1("SELECT * FROM dinner_polls WHERE id=?", (pid,)))
 
 
 async def test_unregistered_tapper_is_told_to_register(bot):
@@ -337,3 +342,123 @@ async def test_retire_survives_an_already_deleted_board(bot):
     # Must not raise, and must still forget the id.
     await dinner.retire_poll_board(bot, pid)
     assert db.q1("SELECT message_id FROM dinner_polls WHERE id=?", (pid,))["message_id"] is None
+
+
+# --- "Finalize the date" once everyone has voted ---------------------------
+
+async def vote_none(bot, poll_id, slug):
+    await dinner.on_callback(fake_update(f"d|none|{poll_id}", IDS[slug]), ctx(bot))
+    await tg.debouncer.flush()
+
+
+def _poll(pid):
+    return db.q1("SELECT * FROM dinner_polls WHERE id=?", (pid,))
+
+
+async def test_all_voted_detects_when_everyone_has_weighed_in(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    days = days_of(pid)
+    assert dinner.all_voted(_poll(pid)) is False
+    for slug in ["dad", "mom", "mark", "dawn"]:
+        await vote(bot, pid, slug, days[0])
+    assert dinner.all_voted(_poll(pid)) is False   # Luke still hasn't voted
+    # A NONE vote counts just like picking a day.
+    await vote_none(bot, pid, "luke")
+    assert dinner.all_voted(_poll(pid)) is True
+
+
+async def test_finalize_prompt_lists_days_with_votes_ranked_by_count(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    days = days_of(pid)
+    # day0: 4 votes; day1: 2 votes; day2: 0 votes. Luke picks nothing but NONE.
+    for slug in ["dad", "mom", "mark", "dawn"]:
+        await vote(bot, pid, slug, days[0])
+    for slug in ["dad", "mom"]:
+        await vote(bot, pid, slug, days[1])
+    await vote_none(bot, pid, "luke")
+
+    ranked = dinner.ranked_days(_poll(pid))
+    assert [d["date"] for d in ranked] == [days[0], days[1]]   # best-first, day2 dropped
+    assert ranked[0]["count"] == 4 and ranked[1]["count"] == 2
+
+    board = bot.board
+    assert "Everyone's voted" in board
+    # Both voted days appear as finalize buttons; the empty day does not.
+    cbs = bot.callbacks()
+    assert f"d|fin|{pid}|{days[0]}" in cbs
+    assert f"d|fin|{pid}|{days[1]}" in cbs
+    assert f"d|fin|{pid}|{days[2]}" not in cbs
+
+
+async def test_non_admin_cannot_finalize(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    day = days_of(pid)[0]
+    for slug in ["dad", "mom", "mark", "dawn"]:
+        await vote(bot, pid, slug, day)
+    await vote_none(bot, pid, "luke")   # everyone voted; day is 4/5
+
+    upd = fake_update(f"d|fin|{pid}|{day}", IDS["dawn"])   # Dawn is not admin
+    await dinner.on_callback(upd, ctx(bot))
+    assert "Only Mark can finalize" in upd.answers[-1]["text"]
+    assert upd.answers[-1]["alert"] is True
+    assert _poll(pid)["status"] == "open"           # nothing locked
+    assert db.scalar("SELECT COUNT(*) FROM dinner_events") == 0
+
+
+async def test_admin_finalizes_a_four_of_five_day_and_schedules_reminders(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    day = days_of(pid)[5]           # six days out, so all three reminders stand
+    for slug in ["dad", "mom", "mark", "dawn"]:
+        await vote(bot, pid, slug, day)
+    await vote_none(bot, pid, "luke")   # 4/5, non-unanimous
+
+    upd = fake_update(f"d|fin|{pid}|{day}", IDS["mark"])   # Mark is admin
+    await dinner.on_callback(upd, ctx(bot))
+
+    poll = _poll(pid)
+    assert poll["status"] == "locked" and poll["locked_date"] == day
+    event = dinner.upcoming_event()
+    assert event["dinner_date"] == day
+    tags = sorted(r["payload"] for r in db.q(
+        "SELECT payload FROM jobs WHERE kind='dinner_remind' AND ref_id=?", (event["id"],)))
+    assert tags == ["day", "t1", "t3"]
+    assert db.has_pending_job("dinner_done", event["id"])
+    assert not db.has_pending_job("dinner_nag", pid)
+
+
+async def test_admin_finalize_is_race_safe(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    days = days_of(pid)
+    for slug in ["dad", "mom", "mark", "dawn"]:
+        await vote(bot, pid, slug, days[0])
+    await vote(bot, pid, "dad", days[1])
+    await vote_none(bot, pid, "luke")
+    assert await dinner.lock(bot, pid, days[0], IDS["mark"]) is True
+    # A second finalize on the now-locked poll must not double-book.
+    upd = fake_update(f"d|fin|{pid}|{days[1]}", IDS["mark"])
+    await dinner.on_callback(upd, ctx(bot))
+    assert db.scalar("SELECT COUNT(*) FROM dinner_events") == 1
+
+
+async def test_all_none_shows_nobody_can_make_any_day(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    for slug in IDS:
+        await vote_none(bot, pid, slug)
+    assert dinner.all_voted(_poll(pid)) is True
+    assert dinner.ranked_days(_poll(pid)) == []
+    assert bot.said("nobody can make any day")
+    # No finalize buttons when there is no real day to pick.
+    assert not any(c.startswith(f"d|fin|{pid}") for c in bot.callbacks())
+
+
+async def test_finalize_keeps_one_live_board(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    day = days_of(pid)[0]
+    for slug in ["dad", "mom", "mark", "dawn"]:
+        await vote(bot, pid, slug, day)
+    board_before = db.q1("SELECT message_id FROM dinner_polls WHERE id=?", (pid,))["message_id"]
+    await vote_none(bot, pid, "luke")   # flips the board to the finalize prompt
+    # Same tracked message id: the vote board became the finalize prompt in place.
+    board_after = db.q1("SELECT message_id FROM dinner_polls WHERE id=?", (pid,))["message_id"]
+    assert board_after == board_before
+    assert bot.edits and "Everyone's voted" in bot.edits[-1].text
