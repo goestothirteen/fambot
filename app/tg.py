@@ -123,6 +123,20 @@ async def edit_or_repost(bot: Bot, chat_id: int, message_id: int | None, text: s
     return await send(bot, chat_id, text, markup)
 
 
+async def delete_message(bot: Bot, chat_id: int, message_id: int | None) -> None:
+    """Remove a board that has been superseded, so only one live board remains.
+
+    Telegram raises when the message is already gone (a user deleted it, or it
+    is too old to delete). That is exactly the state we want, so swallow it.
+    """
+    if message_id is None:
+        return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except TelegramError as e:
+        log.debug("Could not delete %s (%s) - already gone or too old", message_id, e)
+
+
 async def pin(bot: Bot, chat_id: int, message_id: int) -> bool:
     try:
         await bot.pin_chat_message(chat_id=chat_id, message_id=message_id,

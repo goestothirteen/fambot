@@ -42,10 +42,12 @@ class FakeBot:
     def __init__(self) -> None:
         self.sent: list[Sent] = []
         self.edits: list[Sent] = []
+        self.deleted: list[int] = []
         self.pinned: list[int] = []
         self.unpinned: list[int] = []
         self._next_id = 1000
         self.fail_edit = False
+        self.fail_delete = False
 
     async def send_message(self, chat_id, text, reply_markup=None, **kw):
         self._next_id += 1
@@ -59,6 +61,12 @@ class FakeBot:
             raise BadRequest("message to edit not found")
         self.edits.append(Sent(chat_id, text, reply_markup, message_id))
         return SimpleNamespace(message_id=message_id)
+
+    async def delete_message(self, chat_id, message_id, **kw):
+        if self.fail_delete:
+            from telegram.error import BadRequest
+            raise BadRequest("message to delete not found")
+        self.deleted.append(message_id)
 
     async def pin_chat_message(self, chat_id, message_id, **kw):
         self.pinned.append(message_id)
