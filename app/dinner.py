@@ -79,6 +79,33 @@ def viable_days(poll) -> list[str]:
     return [d["date"] for d in poll_state(poll)["days"] if d["viable"]]
 
 
+def all_voted(poll) -> bool:
+    """True once every registered member has cast at least one vote.
+
+    poll_state["waiting"] is exactly the registered members with no vote yet
+    (a real day OR the NONE sentinel both count as voting). Empty waiting means
+    everyone has weighed in, so we can finalize.
+    """
+    return not poll_state(poll)["waiting"]
+
+
+def ranked_days(poll) -> list[dict]:
+    """Candidate days with >=1 real vote, best-first (most people who can make it).
+
+    Ties break on the earlier date so the ordering is stable. Excludes the NONE
+    sentinel (it isn't a real day and never appears in poll_state days).
+    """
+    days = [d for d in poll_state(poll)["days"] if d["count"] > 0]
+    return sorted(days, key=lambda d: (-d["count"], d["date"]))
+
+
+def _admin_name() -> str:
+    for m in db.members():
+        if m["is_admin"]:
+            return m["name"]
+    return "the admin"
+
+
 # --- rendering -------------------------------------------------------------
 
 async def render(bot: Bot, poll_id: int) -> None:
@@ -86,9 +113,19 @@ async def render(bot: Bot, poll_id: int) -> None:
     if poll is None or poll["status"] != "open":
         return
     st = poll_state(poll)
-    text, markup = boards.dinner_poll(
-        poll["id"], st["days"], st["voted"], [m["name"] for m in st["waiting"]],
-        t.parse_iso(poll["deadline_at"]), st["missing"])
+    if not st["waiting"]:
+        # Everyone has voted: the live board becomes the finalize prompt so
+        # there is still only one dinner box (spec 2.5). The admin picks any
+        # day with >=1 vote; unanimous days simply rank top.
+        ranked = ranked_days(poll)
+        if ranked:
+            text, markup = boards.dinner_finalize(poll["id"], ranked, _admin_name())
+        else:
+            text, markup = boards.dinner_finalize_none(poll["id"], poll["days"])
+    else:
+        text, markup = boards.dinner_poll(
+            poll["id"], st["days"], st["voted"], [m["name"] for m in st["waiting"]],
+            t.parse_iso(poll["deadline_at"]), st["missing"])
     chat_id = db.group_chat_id()
     if chat_id is None:
         return
@@ -262,6 +299,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     elif action == "lockc":
         poll_id, day = int(parts[2]), parts[3]
+        if await lock(bot, poll_id, day, user.id):
+            await tg.toast(update, "Locked in 🔒")
+        else:
+            await tg.toast(update, "Someone just beat you to it 😄", alert=True)
+
+    elif action == "fin":
+        # Admin-only finalize once everyone has voted. Unlike "lock", this can
+        # pick a non-unanimous day (>=1 vote), so it is gated on admin here.
+        poll_id, day = int(parts[2]), parts[3]
+        if not db.is_admin(user.id):
+            await tg.toast(update, boards.dinner_finalize_not_admin(_admin_name()),
+                           alert=True)
+            return
+        poll = db.q1("SELECT * FROM dinner_polls WHERE id = ?", (poll_id,))
+        if poll is None or poll["status"] != "open":
+            await tg.toast(update, "That vote is already closed.", alert=True)
+            return
         if await lock(bot, poll_id, day, user.id):
             await tg.toast(update, "Locked in 🔒")
         else:

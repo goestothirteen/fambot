@@ -164,7 +164,7 @@ def dinner_lock_confirm(poll_id: int, day: str) -> tuple[str, M]:
 
 def dinner_locked(event_id: int, day: str, by: str) -> tuple[str, M]:
     return (f"🍜 <b>DINNER IS ON — {t.fmt_date(day)}</b>\n\n"
-            f"All five of us are free. {esc(by)} locked it in.\n"
+            f"{esc(by)} locked it in.\n"
             "I'll remind everyone closer to the day.",
             M([[B("❌ I can't make it any more", callback_data=cb("d", "out", event_id))]]))
 
@@ -197,6 +197,38 @@ def dinner_deadline_none(poll_id: int, days: int) -> tuple[str, M]:
     return ("😔 <b>No day worked for all five of us.</b>\n\nTry the next stretch of days?",
             M([[B(f"🔁 Try the next {days} days", callback_data=cb("d", "ext", poll_id))],
                [B("✖ Drop it for now", callback_data=cb("d", "drop", poll_id))]]))
+
+
+def dinner_finalize(poll_id: int, ranked: list[dict], admin_name: str) -> tuple[str, M]:
+    """Admin-only prompt to finalize a day once everyone has voted.
+
+    `ranked` items: {date, count, required, names}, already sorted best-first.
+    Lists every candidate day with at least one vote and who can make it. Only
+    the admin can actually tap a day — non-admins get a toast (see below).
+    """
+    lines = ["🍜 <b>Everyone's voted — pick the dinner day.</b>", "",
+             f"{esc(admin_name)} can lock in any day below (top one works for "
+             "the most people):", ""]
+    for d in ranked:
+        who = plain_list([esc(n) for n in d["names"]]) or "nobody"
+        lines.append(f"<b>{t.fmt_date(d['date'])}</b> · {d['count']}/{d['required']} "
+                     f"— {who}")
+    rows = [[B(f"🔒 {t.fmt_date(d['date'])} ({d['count']}/{d['required']})",
+               callback_data=cb("d", "fin", poll_id, d["date"]))]
+            for d in ranked]
+    rows.append([B("✖ Cancel this vote", callback_data=cb("d", "kill", poll_id))])
+    return "\n".join(lines), M(rows)
+
+
+def dinner_finalize_none(poll_id: int, days: int) -> tuple[str, M]:
+    return ("😔 <b>Everyone's voted, but nobody can make any day.</b>\n\n"
+            "Try the next stretch of days?",
+            M([[B(f"🔁 Try the next {days} days", callback_data=cb("d", "ext", poll_id))],
+               [B("✖ Drop it for now", callback_data=cb("d", "drop", poll_id))]]))
+
+
+def dinner_finalize_not_admin(admin_name: str) -> str:
+    return f"Only {admin_name} can finalize the date."
 
 
 def dinner_reminder(event_id: int, day: str, when: str) -> tuple[str, M]:

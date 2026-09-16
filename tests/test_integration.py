@@ -65,11 +65,16 @@ async def test_a_week_in_the_life(bot, unregister_all):
     assert "Luke" in bot.last and "Dawn" not in bot.last
 
     await tap(bot, f"d|v|{poll['id']}|{days[3]}", ids["luke"])
-    assert "⭐" in bot.board
-    assert f"d|lock|{poll['id']}|{days[3]}" in bot.callbacks()
+    # Everyone's voted, so the board becomes the admin-only finalize prompt.
+    assert bot.said("Everyone's voted")
+    assert f"d|fin|{poll['id']}|{days[3]}" in bot.callbacks()
 
-    # Dad locks it in.
-    await tap(bot, f"d|lockc|{poll['id']}|{days[3]}", ids["dad"])
+    # A non-admin can't finalize.
+    await tap(bot, f"d|fin|{poll['id']}|{days[3]}", ids["dawn"])
+    assert dinner.open_poll() is not None            # still open, nothing locked
+
+    # Mark (admin) finalizes the unanimous day.
+    await tap(bot, f"d|fin|{poll['id']}|{days[3]}", ids["mark"])
     event = dinner.upcoming_event()
     assert event["dinner_date"] == days[3]
     assert dinner.open_poll() is None
