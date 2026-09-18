@@ -10,7 +10,7 @@ import sys
 
 from telegram import BotCommand, Update
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
-                          ContextTypes, MessageHandler, filters)
+                          ContextTypes)
 
 from app import boards, config, db, dinner, helpreq, roster, scheduler, tg
 
@@ -55,8 +55,11 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
     db.set_setting("group_chat_id", chat.id)
+    # ReplyKeyboardRemove, not a keyboard: clears any old board still stuck
+    # above the message box for everyone in the group.
     await update.effective_message.reply_text(
-        boards.setup_done(), reply_markup=boards.reply_keyboard(), parse_mode="HTML")
+        boards.setup_done(), reply_markup=boards.remove_keyboard(), parse_mode="HTML")
+    db.set_setting("keyboard_removed", "1")
     text, markup = boards.registration(db.members())
     msg = await context.bot.send_message(chat.id, text, reply_markup=markup,
                                          parse_mode="HTML")
@@ -78,7 +81,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat.type in ("group", "supergroup"):
         await update.effective_message.reply_text(
-            boards.help_text(), reply_markup=boards.reply_keyboard(), parse_mode="HTML")
+            boards.help_text(), reply_markup=boards.remove_keyboard(), parse_mode="HTML")
+        db.set_setting("keyboard_removed", "1")
     else:
         await _reply(update, boards.help_text())
 
@@ -131,31 +135,9 @@ async def _require_group(update: Update) -> bool:
     return True
 
 
-# --- the four keyboard labels ---------------------------------------------
-
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """The ONLY text this bot acts on.
-
-    Anything that is not one of the four fixed labels returns immediately -
-    it is never parsed, stored or logged. That keeps the bot deaf to normal
-    family chatter even when Telegram's privacy mode is off (see README).
-    """
-    msg = update.effective_message
-    text = (msg.text or "").strip()
-    if text not in boards.LABELS:
-        return
-    if not await _require_group(update):
-        return
-
-    bot = context.bot
-    if text == boards.L_DINNER:
-        await dinner.entry(bot, update.effective_user.id)
-    elif text == boards.L_RUSH:
-        await helpreq.entry_dog(bot)
-    elif text == boards.L_ROSTER:
-        await roster.entry(bot)
-    elif text == boards.L_HELP:
-        await tg.send_group(bot, boards.help_text())
+# Note: there is deliberately no MessageHandler. Fambot only ever sees its own
+# commands, so ordinary family chatter is never parsed, stored or logged - and
+# nothing sits on top of the message box (see README).
 
 
 # --- callbacks -------------------------------------------------------------
@@ -195,16 +177,34 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # --- lifecycle -------------------------------------------------------------
 
+async def _retire_reply_keyboard(app: Application) -> None:
+    """Post the switch notice once, so the old board disappears by itself.
+
+    ReplyKeyboardRemove only reaches a client when it rides on a message, so
+    dropping the keyboard from the code is not enough - everyone who already
+    has it would keep it until someone ran /setup again. Guarded by a settings
+    flag so a restart never reposts this.
+    """
+    chat_id = db.group_chat_id()
+    if chat_id is None or db.get_setting("keyboard_removed"):
+        return
+    sent = await tg.send(app.bot, chat_id, boards.switched_to_commands(),
+                         boards.remove_keyboard())
+    if sent is not None:
+        db.set_setting("keyboard_removed", "1")
+
+
 async def post_init(app: Application) -> None:
     await app.bot.set_my_commands([
         BotCommand("dinner", "Start or see the family dinner vote"),
         BotCommand("rush", "Ask for help with Rush"),
         BotCommand("roster", "See the Sunday roster"),
-        BotCommand("help", "What the buttons do"),
+        BotCommand("help", "What Fambot can do"),
         BotCommand("whoami", "Show my Telegram ID"),
         BotCommand("setup", "Set Fambot up in this group (admin)"),
         BotCommand("cancel", "Close anything open (admin)"),
     ])
+    await _retire_reply_keyboard(app)
     # Idempotent: keeps the daily top-up check armed across restarts.
     roster.schedule_topup()
     me = await app.bot.get_me()
@@ -233,7 +233,6 @@ def build() -> Application:
     app.add_handler(CallbackQueryHandler(on_setup_cb, pattern=r"^s\|"))
     app.add_handler(CallbackQueryHandler(on_misc_cb, pattern=r"^x\|"))
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
 
     # The durable jobs table is the source of truth; this just scans it.

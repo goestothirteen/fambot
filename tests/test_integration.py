@@ -1,7 +1,7 @@
 """One realistic week, start to finish - the spec 10 checklist as a story."""
 from datetime import timedelta
 
-from app import boards, db, dinner, helpreq, main, roster, scheduler, tg
+from app import db, dinner, helpreq, main, roster, scheduler, tg
 from app import timeutil as t
 from tests.conftest import GROUP, IDS, ctx, fake_update, settle
 from tests.test_handlers import text_update
@@ -33,21 +33,18 @@ async def test_a_week_in_the_life(bot, unregister_all):
     await main.cmd_setup(upd, ctx(bot))
 
     assert db.group_chat_id() == GROUP
-    assert replies[0][1] is not None, "persistent keyboard went out"
+    from telegram import ReplyKeyboardRemove
+    assert isinstance(replies[0][1], ReplyKeyboardRemove), \
+        "the old bottom-of-screen keyboard was cleared"
 
     for i, slug in enumerate(["dad", "mom", "mark", "dawn", "luke"]):
         await tap(bot, f"s|reg|{slug}", 200 + i)
     assert len(db.registered()) == 5
     ids = {m["slug"]: m["user_id"] for m in db.members()}
 
-    # --- Tuesday: normal chatter is ignored ---------------------------------
+    # --- Tuesday: Mom starts a dinner vote with /dinner ---------------------
     bot.reset()
-    await main.on_text(text_update("anyone free to walk rush tmr?"), ctx(bot))
-    await main.on_text(text_update("haha ok"), ctx(bot))
-    assert bot.sent == [], "the bot stayed out of ordinary conversation"
-
-    # --- Tuesday: Mom starts a dinner vote from the keyboard ----------------
-    await main.on_text(text_update(boards.L_DINNER, user_id=ids["mom"]), ctx(bot))
+    await main.cmd_dinner(text_update("/dinner", user_id=ids["mom"]), ctx(bot))
     assert bot.said("Start a dinner vote")
     await tap(bot, "d|open", ids["mom"])
     poll = dinner.open_poll()

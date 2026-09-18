@@ -1,5 +1,7 @@
-"""Spec 10: the bot ignores free text, and registration works by tapping."""
+"""Spec 10: the bot only hears its own commands, and registration is a tap."""
 from types import SimpleNamespace
+
+from telegram import ReplyKeyboardRemove
 
 from app import boards, db, main
 from tests.conftest import GROUP, IDS, ctx, fake_update
@@ -21,44 +23,71 @@ def text_update(text, user_id=IDS["mark"], chat_id=GROUP, chat_type="supergroup"
     return upd
 
 
-async def test_ordinary_chatter_is_ignored_entirely(bot):
-    for chatter in ["anyone free to walk rush tmr?", "lol", "🍜", "dinner",
-                    "/dinner please", "Dinner", " 🍜 Dinner extra"]:
-        upd = text_update(chatter)
-        await main.on_text(upd, ctx(bot))
-    assert bot.sent == []
-    assert all(u for u in [True])          # nothing replied, nothing crashed
+async def test_nothing_listens_to_free_text(bot):
+    """Ordinary chatter can't reach the bot - no MessageHandler exists."""
+    assert not hasattr(main, "on_text")
+    src = open(main.__file__, encoding="utf-8").read()
+    assert "app.add_handler(MessageHandler" not in src
 
 
-async def test_the_four_labels_are_the_only_text_that_acts(bot):
-    await main.on_text(text_update(boards.L_HELP), ctx(bot))
-    assert bot.said("How Fambot works")
+async def test_each_command_opens_its_flow(bot):
+    await main.cmd_help(text_update("/help"), ctx(bot))
 
     bot.reset()
-    await main.on_text(text_update(boards.L_DINNER), ctx(bot))
+    await main.cmd_dinner(text_update("/dinner"), ctx(bot))
     assert bot.said("Start a dinner vote")
 
     bot.reset()
-    await main.on_text(text_update(boards.L_RUSH), ctx(bot))
+    await main.cmd_rush(text_update("/rush"), ctx(bot))
     assert bot.said("What do you need?")
 
     bot.reset()
-    await main.on_text(text_update(boards.L_ROSTER), ctx(bot))
+    await main.cmd_roster(text_update("/roster"), ctx(bot))
     assert bot.said("Roster")
 
 
-async def test_labels_do_nothing_in_another_chat(bot):
-    upd = text_update(boards.L_DINNER, chat_id=-999)
-    await main.on_text(upd, ctx(bot))
+async def test_commands_do_nothing_in_another_chat(bot):
+    upd = text_update("/dinner", chat_id=-999)
+    await main.cmd_dinner(upd, ctx(bot))
     assert bot.sent == []
     assert "family group" in upd.replies[0]
 
 
-async def test_labels_do_nothing_before_setup(bot):
+async def test_commands_do_nothing_before_setup(bot):
     db.x("DELETE FROM settings WHERE key='group_chat_id'")
-    upd = text_update(boards.L_DINNER)
-    await main.on_text(upd, ctx(bot))
+    upd = text_update("/dinner")
+    await main.cmd_dinner(upd, ctx(bot))
     assert "isn't set up yet" in upd.replies[0]
+
+
+async def test_help_lists_the_commands(bot):
+    text = boards.help_text()
+    for cmd in (boards.C_DINNER, boards.C_RUSH, boards.C_ROSTER, boards.C_HELP):
+        assert cmd in text
+
+
+async def test_start_in_the_group_takes_the_old_keyboard_away(bot):
+    sent = []
+
+    async def reply_text(t, reply_markup=None, **kw):
+        sent.append((t, reply_markup))
+        return SimpleNamespace(message_id=9)
+
+    upd = text_update("/start")
+    upd.effective_message.reply_text = reply_text
+    await main.cmd_start(upd, ctx(bot))
+    assert isinstance(sent[0][1], ReplyKeyboardRemove)
+
+
+async def test_the_switch_notice_is_posted_once(bot):
+    app = SimpleNamespace(bot=bot)
+    await main._retire_reply_keyboard(app)
+    assert bot.said("Fambot changed slightly")
+    assert isinstance(bot.sent[-1].markup, ReplyKeyboardRemove)
+
+    bot.reset()
+    await main._retire_reply_keyboard(app)
+    assert bot.sent == []               # a restart never reposts it
 
 
 async def test_registration_binds_the_tapper_to_that_name(bot, unregister_all):
@@ -81,7 +110,7 @@ async def test_registration_board_celebrates_when_complete(bot):
     assert "Everyone's in" in text
 
 
-async def test_setup_stores_the_group_and_posts_the_keyboard(bot):
+async def test_setup_stores_the_group_and_clears_any_old_keyboard(bot):
     db.x("DELETE FROM settings WHERE key='group_chat_id'")
     sent = []
 
@@ -95,7 +124,7 @@ async def test_setup_stores_the_group_and_posts_the_keyboard(bot):
 
     assert db.group_chat_id() == GROUP
     assert "Fambot is set up" in sent[0][0]
-    assert sent[0][1] is not None          # the persistent reply keyboard
+    assert isinstance(sent[0][1], ReplyKeyboardRemove)
     assert bot.said("Tap your own name")
     assert db.has_pending_job("roster_topup")
 

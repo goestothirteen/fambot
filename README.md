@@ -1,17 +1,19 @@
 # Fambot
 
-A buttons-only Telegram bot that keeps one family's dinners, dog walks and home
-cover from falling through the cracks. Built for a Telegram group where two of
-the five members will never type a command, so **every interaction is a button**.
+A Telegram bot that keeps one family's dinners, dog walks and home cover from
+falling through the cracks. You start something with a slash command — type `/`
+and pick from the list Telegram shows you — and everything after that is
+tap-only buttons on the bot's own messages. Nothing ever sits on top of the
+message box.
 
 Three features, one engine: someone opens a request → the bot collects
 responses → a human confirms the outcome → the bot reminds → dropouts reopen it.
 
-- **🍜 Dinner** — a 7-day multi-select vote. A day only becomes bookable when
+- **🍜 Dinner** (`/dinner`) — a 7-day multi-select vote. A day only becomes bookable when
   all five mark it free; a person then taps 🔒 to lock it. The bot never picks.
-- **🐕 Rush** — dog-walk help. "Come along" is open to any kid; "take over the
+- **🐕 Rush** (`/rush`) — dog-walk help. "Come along" is open to any kid; "take over the
   walk" needs a driver, because taking over means driving.
-- **📅 Roster** — home cover on request, plus a rolling Sunday-evening roster
+- **📅 Roster** (`/roster`) — home cover on request, plus a rolling Sunday-evening roster
   shared among the three kids by a fairness rule.
 
 No LLM anywhere. Every tap gets the same instant, deterministic answer.
@@ -27,7 +29,7 @@ cp .env.example .env            # add your BOT_TOKEN
 DB_PATH=./data/fambot.db MEMBERS_FILE=./members.example.json python -m app.main
 ```
 
-Run the tests — 112 of them, all offline, no network and no Telegram:
+Run the tests — 125 of them, all offline, no network and no Telegram:
 
 ```bash
 pip install pytest pytest-asyncio
@@ -38,36 +40,40 @@ python -m pytest -q
 
 1. Message [@BotFather](https://t.me/BotFather) → `/newbot` → pick a name
    ("Fambot") and a free handle (e.g. `@h5fambot`). Copy the token into `.env`.
-2. `/setprivacy` → see **Privacy mode** below before choosing.
+2. `/setprivacy` → **Enable** (see **Privacy mode** below).
 3. Add the bot to the family group.
 4. Make it a **group admin** — otherwise it cannot pin the roster. Everything
    else still works without admin; pinning just silently no-ops.
-5. Send `/setup` in the group. The bot stores the chat id, puts up the
-   persistent keyboard, and posts a registration card.
+5. Send `/setup` in the group. The bot stores the chat id and posts a
+   registration card.
 6. Everyone taps their own name once. That is the only setup anyone has to do.
-7. Tap **📅 Roster → ⚙️ Set up the Sunday roster** to start the first
-   availability round immediately.
+7. `/roster` → **⚙️ Set up the Sunday roster** to start the first availability
+   round immediately.
 
 `/whoami` is the fallback if registration ever needs doing by hand.
 
-## Privacy mode — read this before `/setprivacy`
+## Privacy mode — set it ON
 
-The spec asks for both "privacy mode ON" and "a persistent reply keyboard".
-**Telegram does not allow both.** A reply-keyboard tap arrives as an ordinary
-text message, and with privacy mode ON a bot never receives ordinary text
-messages in a group — only commands, replies to itself, and callback taps. With
-privacy ON the four bottom-of-screen buttons would do nothing.
+Privacy mode ON is the right setting now, and it used to be impossible.
 
-So the default is **privacy mode OFF**, and the bot is made deaf in code
-instead. `app/main.py:on_text` compares the message against exactly four fixed
-label strings and returns immediately on anything else — nothing is parsed,
-stored or logged. `tests/test_handlers.py` asserts this against real family
-chatter, including near-misses like `dinner`, `Dinner` and `🍜 Dinner extra`.
+The original build put a persistent reply keyboard above the message box. A
+reply-keyboard tap arrives as an ordinary text message, and a bot in privacy
+mode never receives ordinary text messages in a group — only commands, replies
+to itself and callback taps. So the keyboard forced privacy OFF, and the bot had
+to be made deaf in code instead.
 
-If you would rather have privacy ON, you can: run `/setprivacy` → Enable, and
-use the inline **home board** instead (`/start` posts one, and it carries the
-same four buttons as callback buttons, which always reach the bot). The reply
-keyboard then becomes decorative. Everything else is unaffected.
+The keyboard is gone (it covered the message box and got in the way in a group
+people also chat in), so every entry point is now a command or a callback tap —
+exactly the two things privacy mode still delivers. Run `/setprivacy` → **Enable**.
+
+Deafness is now enforced in two places at once: Telegram doesn't forward family
+chatter, and there is no `MessageHandler` registered in `app/main.py` to receive
+it if it did. `tests/test_handlers.py` asserts the second half.
+
+Upgrading an existing install: on first start after this change the bot posts one
+notice into the group carrying `ReplyKeyboardRemove`, which clears the old board
+off everyone's screen. It is guarded by a `keyboard_removed` setting, so a
+restart never reposts it.
 
 ## Deploying to the droplet
 
@@ -134,8 +140,9 @@ from app import db; db.init(); db.set_setting('dinner_nag_hours', 8)"
 | `roster_close_grace_seconds` | `120` | Wait after the last kid answers |
 | `fairness_weeks` | `8` | Trailing window for counting duties |
 
-Admin commands: `/setup`, `/cancel` (closes anything open). Power-user aliases,
-never required: `/dinner`, `/rush`, `/roster`, `/whoami`.
+Commands: `/dinner`, `/rush`, `/roster`, `/help`, `/whoami`, plus the admin-only
+`/setup` and `/cancel` (closes anything open). They are registered with
+BotFather at startup, so typing `/` in the group lists them with descriptions.
 
 ## How it is put together
 
@@ -200,6 +207,15 @@ instant produce one winner and one "already grabbed this 😄".
 
 7. **Extra modules** `timeutil.py` and `tg.py` split out of what the spec drew
    as `db.py`/`boards.py`, to keep Telegram plumbing out of the copy file.
+
+8. **Slash commands instead of a persistent keyboard.** The spec asks for four
+   buttons pinned above the message box so nobody ever types. In practice they
+   were always there — in a group the family also chats in, they covered the
+   keyboard and got in the way. Entry is now `/dinner`, `/rush`, `/roster`,
+   `/help`; Telegram's own `/` menu lists them with descriptions, so it is still
+   pick-from-a-list rather than remembering anything, and every step *after*
+   the entry point is unchanged tap-only inline buttons. It also makes privacy
+   mode ON possible for the first time.
 
 ## Not in v1
 

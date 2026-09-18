@@ -9,17 +9,21 @@ from __future__ import annotations
 from datetime import timedelta
 
 from telegram import (InlineKeyboardButton as B, InlineKeyboardMarkup as M,
-                      KeyboardButton, ReplyKeyboardMarkup)
+                      ReplyKeyboardRemove)
 
 from app import timeutil as t
 from app.tg import cb, esc, plain_list
 
-# --- the four fixed labels on the persistent keyboard ---------------------
+# --- the four things Fambot does, and the command for each ----------------
+# Labels are display only now; nothing is matched against message text.
 L_DINNER = "🍜 Dinner"
 L_RUSH = "🐕 Rush"
 L_ROSTER = "📅 Roster"
 L_HELP = "❓ Help"
-LABELS = {L_DINNER, L_RUSH, L_ROSTER, L_HELP}
+C_DINNER = "/dinner"
+C_RUSH = "/rush"
+C_ROSTER = "/roster"
+C_HELP = "/help"
 
 TASK_LABELS = {"dogs": "watch the dogs", "house": "watch the house",
                "both": "watch the dogs and the house"}
@@ -28,12 +32,15 @@ KIND_LABELS = {"dog_accompany": "Come along on the walk",
                "coverage": "Be at home"}
 
 
-def reply_keyboard() -> ReplyKeyboardMarkup:
-    """The board — tucked behind the keyboard icon, shown only when tapped."""
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton(L_DINNER), KeyboardButton(L_RUSH)],
-         [KeyboardButton(L_ROSTER), KeyboardButton(L_HELP)]],
-        resize_keyboard=True, is_persistent=False)
+def remove_keyboard() -> ReplyKeyboardRemove:
+    """Clear the old reply keyboard off everyone's screen.
+
+    is_persistent=False was not enough - the board still opened over the
+    message box. Fambot is command-driven now, so there is no board at all.
+    Sent once after the switch, and again on /setup and /start so clients
+    that still hold the old one drop it.
+    """
+    return ReplyKeyboardRemove()
 
 
 def home() -> tuple[str, M]:
@@ -47,14 +54,17 @@ def home() -> tuple[str, M]:
 def help_text() -> str:
     return (
         "❓ <b>How Fambot works</b>\n\n"
-        f"{L_DINNER} — start a vote for the next family dinner. Tap every day "
-        "you're free; when all five of us are free on the same day, anyone can "
-        "lock it in.\n\n"
-        f"{L_RUSH} — ask for help with Rush. Pick a day and a time, say whether "
-        "you want company or someone to take the walk over, and it goes to the group.\n\n"
-        f"{L_ROSTER} — see who's on Sunday duty, ask someone to be home, or set up "
-        "the Sunday roster.\n\n"
-        "Everything is buttons. You never have to type anything."
+        "Type <b>/</b> in the message box and Telegram lists these for you. "
+        "Tap one, and everything after that is buttons.\n\n"
+        f"<code>{C_DINNER}</code> {L_DINNER} — start a vote for the next family "
+        "dinner. Tap every day you're free; when all five of us are free on the "
+        "same day, anyone can lock it in.\n\n"
+        f"<code>{C_RUSH}</code> {L_RUSH} — ask for help with Rush. Pick a day and "
+        "a time, say whether you want company or someone to take the walk over, "
+        "and it goes to the group.\n\n"
+        f"<code>{C_ROSTER}</code> {L_ROSTER} — see who's on Sunday duty, ask "
+        "someone to be home, or set up the Sunday roster.\n\n"
+        f"<code>{C_HELP}</code> {L_HELP} — this message."
     )
 
 
@@ -97,8 +107,16 @@ def registration(members) -> tuple[str, M]:
 
 def setup_done() -> str:
     return ("✅ Fambot is set up for this group.\n\n"
-            "The four buttons at the bottom of your screen are how you use me — "
-            f"tap {L_HELP} any time for a reminder of what they do.")
+            "Type <b>/</b> in the message box to see everything I can do — "
+            f"<code>{C_HELP}</code> any time for a reminder.")
+
+
+def switched_to_commands() -> str:
+    """One-off notice when the old bottom-of-screen keyboard is taken away."""
+    return ("🔁 <b>Fambot changed slightly.</b>\n\n"
+            "The four buttons that sat on top of your keyboard are gone — they "
+            "were in the way. Type <b>/</b> in the message box instead and pick "
+            f"from the list. <code>{C_HELP}</code> explains the rest.")
 
 
 def whoami(name: str | None, user_id: int) -> str:
