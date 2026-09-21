@@ -96,6 +96,8 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     poll = dinner.open_poll()
     if poll is not None:
         dinner.close_poll(poll["id"], "cancelled")
+        # Empty the dinner box too, or a dead vote board keeps live buttons.
+        await dinner.clear_board(context.bot, poll["id"])
         closed.append("the dinner vote")
     rnd = roster.open_round()
     if rnd is not None:

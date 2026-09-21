@@ -77,6 +77,6 @@ def test_cancel_jobs_scopes_to_kind_and_ref():
 
 
 def test_settings_fall_back_to_defaults():
-    assert db.get_int("dinner_nag_hours") == 6
+    assert db.get_int("dinner_nag_hours") == 24
     db.set_setting("dinner_nag_hours", 3)
     assert db.get_int("dinner_nag_hours") == 3

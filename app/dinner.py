@@ -3,6 +3,14 @@
 The engine: open a 7-day poll, everyone multi-selects, a day becomes viable
 only when all five have ticked it, and then a human locks it in. The bot
 never picks the day itself (spec 2.2).
+
+One box, always. A dinner occupies exactly one message in the family group
+from the moment a vote opens until the night itself: the vote board, the lock
+confirmation, the "dinner is on" card and every reminder are all the same
+message being rewritten. Editing is silent, so when something genuinely has
+to reach phones the box is taken down and re-posted at the bottom instead -
+still one message, but one that pings. Nothing else is ever posted, because
+the family group is for the family, not for the bot.
 """
 from __future__ import annotations
 
@@ -89,6 +97,10 @@ def all_voted(poll) -> bool:
     return not poll_state(poll)["waiting"]
 
 
+def past_deadline(poll) -> bool:
+    return t.parse_iso(poll["deadline_at"]) <= t.now_utc()
+
+
 def ranked_days(poll) -> list[dict]:
     """Candidate days with >=1 real vote, best-first (most people who can make it).
 
@@ -106,32 +118,99 @@ def _admin_name() -> str:
     return "the admin"
 
 
+# --- the guest list --------------------------------------------------------
+
+def _snapshot_attendees(event_id: int, poll_id: int, day: str) -> None:
+    """Freeze who is coming, at the moment the day is locked in.
+
+    Whoever ticked the chosen day is expected at dinner. Taking a copy means
+    a later poll, or someone editing votes on a stale board, cannot quietly
+    change who the bot thinks is coming.
+    """
+    for r in db.q("SELECT user_id FROM dinner_votes WHERE poll_id = ? AND vote_date = ?",
+                  (poll_id, day)):
+        db.x("INSERT OR IGNORE INTO dinner_attendees (event_id, user_id) "
+             "VALUES (?, ?)", (event_id, r["user_id"]))
+
+
+def attendees(event_id: int) -> list:
+    ids = {r["user_id"] for r in
+           db.q("SELECT user_id FROM dinner_attendees WHERE event_id = ?", (event_id,))}
+    return [m for m in db.members() if m["user_id"] in ids]
+
+
+def absentees(event_id: int) -> list[str]:
+    ids = {r["user_id"] for r in
+           db.q("SELECT user_id FROM dinner_attendees WHERE event_id = ?", (event_id,))}
+    return [m["name"] for m in db.members() if m["user_id"] not in ids]
+
+
+# --- the one box -----------------------------------------------------------
+
+async def _show(bot: Bot, message_id: int | None, text, markup,
+                bump: bool) -> int | None:
+    """Put `text` in the dinner box, and tell the caller where the box now is.
+
+    bump=False edits in place: instant, and nobody's phone lights up. bump=True
+    takes the box down and re-posts it at the bottom, which is the only way a
+    reminder or a chase-up actually reaches anyone.
+    """
+    chat_id = db.group_chat_id()
+    if chat_id is None:
+        return None
+    if bump:
+        return await tg.repost(bot, chat_id, message_id, text, markup,
+                               boards.dinner_board_moved())
+    return await tg.edit_or_repost(bot, chat_id, message_id, text, markup)
+
+
+async def _show_poll(bot: Bot, poll_id: int, text, markup, bump: bool) -> None:
+    poll = db.q1("SELECT message_id FROM dinner_polls WHERE id = ?", (poll_id,))
+    if poll is None:
+        return
+    new_id = await _show(bot, poll["message_id"], text, markup, bump)
+    if new_id and new_id != poll["message_id"]:
+        db.x("UPDATE dinner_polls SET message_id = ? WHERE id = ?", (new_id, poll_id))
+
+
+async def _show_event(bot: Bot, event_id: int, text, markup, bump: bool) -> None:
+    event = db.q1("SELECT message_id FROM dinner_events WHERE id = ?", (event_id,))
+    if event is None:
+        return
+    new_id = await _show(bot, event["message_id"], text, markup, bump)
+    if new_id and new_id != event["message_id"]:
+        db.x("UPDATE dinner_events SET message_id = ? WHERE id = ?", (new_id, event_id))
+
+
 # --- rendering -------------------------------------------------------------
 
-async def render(bot: Bot, poll_id: int) -> None:
+async def render(bot: Bot, poll_id: int, bump: bool = False) -> None:
+    """Draw the vote board, or the pick-a-day prompt once voting is over.
+
+    Voting is over when everyone has answered *or* the deadline has passed.
+    Either way the admin can take any day with at least one vote - "four of us
+    can do Friday" is a dinner, not a failure - so a day nobody can all make
+    no longer dead-ends the whole thing.
+    """
     poll = db.q1("SELECT * FROM dinner_polls WHERE id = ?", (poll_id,))
     if poll is None or poll["status"] != "open":
         return
     st = poll_state(poll)
-    if not st["waiting"]:
-        # Everyone has voted: the live board becomes the finalize prompt so
-        # there is still only one dinner box (spec 2.5). The admin picks any
-        # day with >=1 vote; unanimous days simply rank top.
+    closed = past_deadline(poll)
+    if closed or not st["waiting"]:
         ranked = ranked_days(poll)
         if ranked:
-            text, markup = boards.dinner_finalize(poll["id"], ranked, _admin_name())
+            text, markup = boards.dinner_finalize(poll["id"], ranked,
+                                                  _admin_name(), closed)
         else:
-            text, markup = boards.dinner_finalize_none(poll["id"], poll["days"])
+            text, markup = boards.dinner_finalize_none(poll["id"], poll["days"], closed)
     else:
+        # Mentions, not names: a re-posted board is how non-voters get chased,
+        # so the waiting list has to be tappable pings.
         text, markup = boards.dinner_poll(
-            poll["id"], st["days"], st["voted"], [m["name"] for m in st["waiting"]],
+            poll["id"], st["days"], st["voted"], tg.mention_list(st["waiting"]),
             t.parse_iso(poll["deadline_at"]), st["missing"])
-    chat_id = db.group_chat_id()
-    if chat_id is None:
-        return
-    new_id = await tg.edit_or_repost(bot, chat_id, poll["message_id"], text, markup)
-    if new_id and new_id != poll["message_id"]:
-        db.x("UPDATE dinner_polls SET message_id = ? WHERE id = ?", (new_id, poll["id"]))
+    await _show_poll(bot, poll["id"], text, markup, bump)
 
 
 def schedule_render(bot: Bot, poll_id: int) -> None:
@@ -139,17 +218,42 @@ def schedule_render(bot: Bot, poll_id: int) -> None:
     tg.debouncer.trigger(f"dinner:{poll_id}", lambda: render(bot, poll_id))
 
 
+def phase_for(day: str) -> str:
+    """Which headline the locked-dinner card should be wearing right now."""
+    gap = (t.parse_date(day) - t.today_local()).days
+    if gap <= 0:
+        return "day"
+    if gap == 1:
+        return "t1"
+    return "locked"
+
+
+async def render_event(bot: Bot, event_id: int, phase: str | None = None,
+                       bump: bool = False, locked_by: str | None = None) -> None:
+    event = db.q1("SELECT * FROM dinner_events WHERE id = ?", (event_id,))
+    if event is None:
+        return
+    day = event["dinner_date"]
+    text, markup = boards.dinner_event_card(
+        event_id, day, tg.mention_list(attendees(event_id)), absentees(event_id),
+        phase or phase_for(day), locked_by)
+    await _show_event(bot, event_id, text, markup, bump)
+
+
 # --- opening / closing -----------------------------------------------------
 
-async def open_new(bot: Bot, opened_by: int | None, start: date | None = None) -> int:
+async def open_new(bot: Bot, opened_by: int | None, start: date | None = None,
+                   adopt_message_id: int | None = None) -> int:
+    """Start a vote. `adopt_message_id` reuses the box the last one left behind."""
     days = db.get_int("dinner_window_days")
     # Candidate days start tomorrow - dinner needs runway (spec 5.2).
     first = start or (t.today_local() + timedelta(days=1))
     deadline = t.now_utc() + timedelta(hours=db.get_int("poll_deadline_hours"))
     cur = db.x(
         "INSERT INTO dinner_polls (status, opened_by, opened_at, deadline_at, "
-        "start_date, days) VALUES ('open', ?, ?, ?, ?, ?)",
-        (opened_by, t.iso(t.now_utc()), t.iso(deadline), first.isoformat(), days))
+        "start_date, days, message_id) VALUES ('open', ?, ?, ?, ?, ?, ?)",
+        (opened_by, t.iso(t.now_utc()), t.iso(deadline), first.isoformat(), days,
+         adopt_message_id))
     poll_id = int(cur.lastrowid)
 
     db.add_job(deadline, "dinner_deadline", poll_id, respect_quiet=False)
@@ -165,22 +269,23 @@ def close_poll(poll_id: int, status: str) -> None:
     db.cancel_jobs("dinner_deadline", poll_id)
 
 
-async def retire_poll_board(bot: Bot, poll_id: int) -> None:
-    """Take down the live vote board so only one dinner board exists at a time.
-
-    Several flows replace the vote board with a *new* group message (a lock
-    confirmation, a cancellation notice, a fresh poll, a deadline board). If we
-    just posted the new one, the old vote board would linger with live buttons -
-    the "stale box" (spec 2.5: one live board per activity). Delete the tracked
-    message and forget its id; a user having already deleted it is fine.
-    """
+def _release_box(poll_id: int) -> int | None:
+    """Hand the poll's message over to whatever comes next, and forget it."""
     poll = db.q1("SELECT message_id FROM dinner_polls WHERE id = ?", (poll_id,))
-    if poll is None or poll["message_id"] is None:
-        return
-    chat_id = db.group_chat_id()
-    if chat_id is not None:
-        await tg.delete_message(bot, chat_id, poll["message_id"])
+    if poll is None:
+        return None
     db.x("UPDATE dinner_polls SET message_id = NULL WHERE id = ?", (poll_id,))
+    return poll["message_id"]
+
+
+async def clear_board(bot: Bot, poll_id: int) -> None:
+    """Empty the dinner box after a vote is killed from outside (admin /cancel).
+
+    Closing the poll row is not enough on its own: the board would still be
+    sitting in the group with live buttons on a vote that no longer exists.
+    """
+    text, markup = boards.dinner_vote_cancelled()
+    await _show_poll(bot, poll_id, text, markup, bump=False)
 
 
 async def lock(bot: Bot, poll_id: int, day: str, by_user: int) -> bool:
@@ -192,17 +297,17 @@ async def lock(bot: Bot, poll_id: int, day: str, by_user: int) -> bool:
     db.cancel_jobs("dinner_nag", poll_id)
     db.cancel_jobs("dinner_deadline", poll_id)
 
-    cur = db.x("INSERT INTO dinner_events (poll_id, dinner_date, status, created_at) "
-               "VALUES (?, ?, 'upcoming', ?)", (poll_id, day, t.iso(t.now_utc())))
+    box = _release_box(poll_id)
+    cur = db.x("INSERT INTO dinner_events (poll_id, dinner_date, status, created_at, "
+               "message_id) VALUES (?, ?, 'upcoming', ?, ?)",
+               (poll_id, day, t.iso(t.now_utc()), box))
     event_id = int(cur.lastrowid)
+    _snapshot_attendees(event_id, poll_id, day)
     schedule_event_jobs(event_id, day)
 
-    text, markup = boards.dinner_locked(event_id, day, db.name_of(by_user))
-    chat_id = db.group_chat_id()
-    poll = db.q1("SELECT * FROM dinner_polls WHERE id = ?", (poll_id,))
-    if chat_id is not None:
-        msg_id = await tg.edit_or_repost(bot, chat_id, poll["message_id"], text, markup)
-        db.x("UPDATE dinner_events SET message_id = ? WHERE id = ?", (msg_id, event_id))
+    # Worth a ping: the vote box becomes the dinner card, at the bottom.
+    await render_event(bot, event_id, "locked", bump=True,
+                       locked_by=db.name_of(by_user))
     return True
 
 
@@ -229,28 +334,35 @@ def cancel_event(event_id: int) -> str | None:
     return row["dinner_date"]
 
 
-# --- entry point (🍜 button / /dinner) -------------------------------------
+def _release_event_box(event_id: int) -> int | None:
+    event = db.q1("SELECT message_id FROM dinner_events WHERE id = ?", (event_id,))
+    if event is None:
+        return None
+    db.x("UPDATE dinner_events SET message_id = NULL WHERE id = ?", (event_id,))
+    return event["message_id"]
+
+
+# --- entry point (/dinner) -------------------------------------------------
 
 async def entry(bot: Bot, user_id: int) -> None:
+    """/dinner never adds to the chat.
+
+    If a dinner is already in flight, the existing box is moved down to the
+    bottom where the asker is looking - same single message, no duplicate
+    board, nothing to scroll back for. Only a genuinely fresh start creates
+    anything.
+    """
     event = upcoming_event()
     if event is not None:
-        dropouts = [db.name_of(r["user_id"]) for r in
-                    db.q("SELECT user_id FROM dinner_dropouts WHERE event_id = ?",
-                         (event["id"],))]
-        text, markup = boards.dinner_view_locked(
-            event["id"], event["dinner_date"], dropouts, db.is_admin(user_id))
-        await tg.send_group(bot, text, markup)
+        await render_event(bot, event["id"], bump=True)
         return
 
     poll = open_poll()
     if poll is not None:
-        # Bump the live board rather than starting a duplicate (spec 4.1).
-        db.x("UPDATE dinner_polls SET message_id = NULL WHERE id = ?", (poll["id"],))
-        await render(bot, poll["id"])
+        await render(bot, poll["id"], bump=True)
         return
 
-    text, markup = boards.dinner_start_prompt(db.get_int("dinner_window_days"))
-    await tg.send_group(bot, text, markup)
+    await open_new(bot, user_id)
 
 
 # --- callbacks -------------------------------------------------------------
@@ -272,7 +384,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     elif action == "open":
         await tg.toast(update, "")
         if open_poll() is None and upcoming_event() is None:
-            await open_new(bot, user.id)
+            # Take over whichever box the tap came from, so a finished dinner
+            # turns into the new vote rather than sitting beside it. The old
+            # event lets go of the message first, so only one row owns it.
+            box = update.callback_query.message.message_id
+            db.x("UPDATE dinner_events SET message_id = NULL WHERE message_id = ?", (box,))
+            await open_new(bot, user.id, adopt_message_id=box)
 
     elif action == "board":
         await tg.toast(update, "")
@@ -291,11 +408,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await tg.toast(update, "That vote is already closed.", alert=True)
             return
         await tg.toast(update, "")
-        # The confirm dialog supersedes the vote board; drop it so there is
-        # only one live dinner box while the tapper confirms.
-        await retire_poll_board(bot, poll_id)
+        # The confirm step happens inside the vote box, not beside it.
         text, markup = boards.dinner_lock_confirm(poll_id, day)
-        await tg.send_group(bot, text, markup)
+        await _show_poll(bot, poll_id, text, markup, bump=False)
 
     elif action == "lockc":
         poll_id, day = int(parts[2]), parts[3]
@@ -305,12 +420,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await tg.toast(update, "Someone just beat you to it 😄", alert=True)
 
     elif action == "fin":
-        # Admin-only finalize once everyone has voted. Unlike "lock", this can
-        # pick a non-unanimous day (>=1 vote), so it is gated on admin here.
+        # Admin-only finalize. Unlike "lock", this can pick a non-unanimous day
+        # (>=1 vote), so it is gated on admin here.
         poll_id, day = int(parts[2]), parts[3]
         if not db.is_admin(user.id):
-            await tg.toast(update, boards.dinner_finalize_not_admin(_admin_name()),
-                           alert=True)
+            await tg.toast(update, boards.dinner_not_admin(_admin_name()), alert=True)
             return
         poll = db.q1("SELECT * FROM dinner_polls WHERE id = ?", (poll_id,))
         if poll is None or poll["status"] != "open":
@@ -321,46 +435,48 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         else:
             await tg.toast(update, "Someone just beat you to it 😄", alert=True)
 
-    elif action == "kill":
+    elif action in ("kill", "drop"):
         poll_id = int(parts[2])
         close_poll(poll_id, "cancelled")
-        await retire_poll_board(bot, poll_id)
         await tg.toast(update, "")
-        await tg.send_group(bot, boards.dinner_poll_cancelled())
+        text, markup = boards.dinner_vote_cancelled()
+        await _show_poll(bot, poll_id, text, markup, bump=False)
 
     elif action == "ext":
         poll_id = int(parts[2])
         poll = db.q1("SELECT * FROM dinner_polls WHERE id = ?", (poll_id,))
         close_poll(poll_id, "expired")
-        await retire_poll_board(bot, poll_id)
         await tg.toast(update, "")
-        # Votes reset; the window rolls forward to the days after the old ones.
+        # Votes reset; the window rolls forward to the days after the old ones,
+        # and the new vote takes over the same box.
         nxt = t.parse_date(poll["start_date"]) + timedelta(days=poll["days"])
         start = max(nxt, t.today_local() + timedelta(days=1))
-        await open_new(bot, user.id, start)
-
-    elif action == "drop":
-        poll_id = int(parts[2])
-        close_poll(poll_id, "cancelled")
-        await retire_poll_board(bot, poll_id)
-        await tg.toast(update, "")
-        await tg.send_group(bot, boards.dinner_dropped())
-
-    elif action in ("in", "out"):
-        await _rsvp(update, bot, int(parts[2]), user.id, action == "in")
+        await open_new(bot, user.id, start, adopt_message_id=_release_box(poll_id))
 
     elif action == "revote":
+        # Admin changed their mind: drop this dinner and re-open the vote in
+        # the same box.
         event_id = int(parts[2])
-        cancel_event(event_id)
+        if not db.is_admin(user.id):
+            await tg.toast(update, boards.dinner_not_admin(_admin_name()), alert=True)
+            return
+        if cancel_event(event_id) is None:
+            await tg.toast(update, "That dinner isn't on any more.", alert=True)
+            return
         await tg.toast(update, "")
-        await open_new(bot, user.id)
+        await open_new(bot, user.id,
+                       adopt_message_id=_release_event_box(event_id))
 
     elif action == "ecancel":
         event_id = int(parts[2])
+        if not db.is_admin(user.id):
+            await tg.toast(update, boards.dinner_not_admin(_admin_name()), alert=True)
+            return
         day = cancel_event(event_id)
         await tg.toast(update, "")
         if day:
-            await tg.send_group(bot, boards.dinner_cancelled(day))
+            text, markup = boards.dinner_event_cancelled(day)
+            await _show_event(bot, event_id, text, markup, bump=False)
 
 
 async def _toggle(update, bot, poll_id: int, day: str, user_id: int) -> None:
@@ -396,34 +512,26 @@ async def _vote_none(update, bot, poll_id: int, user_id: int) -> None:
     schedule_render(bot, poll_id)
 
 
-async def _rsvp(update, bot, event_id: int, user_id: int, coming: bool) -> None:
-    event = db.q1("SELECT * FROM dinner_events WHERE id = ?", (event_id,))
-    if event is None or event["status"] != "upcoming":
-        await tg.toast(update, "That dinner isn't on any more.", alert=True)
-        return
-    who = db.name_of(user_id)
-    if coming:
-        db.x("DELETE FROM dinner_dropouts WHERE event_id = ? AND user_id = ?",
-             (event_id, user_id))
-        await tg.toast(update, "👍 Thanks!")
-        return
-    db.x("INSERT OR IGNORE INTO dinner_dropouts (event_id, user_id) VALUES (?, ?)",
-         (event_id, user_id))
-    await tg.toast(update, "OK, I've let everyone know.")
-    text, markup = boards.dinner_dropout(event_id, who, event["dinner_date"])
-    await tg.send_group(bot, text, markup)
-
-
 # --- scheduled jobs --------------------------------------------------------
 
 @scheduler.on("dinner_nag")
 async def _job_nag(bot: Bot, job) -> None:
+    """Chase non-voters by moving the board, not by adding to the chat.
+
+    The board already lists who it is waiting on, as mentions, so re-posting
+    it pings exactly those people and leaves the group one message richer
+    than before: zero.
+    """
     poll = db.q1("SELECT * FROM dinner_polls WHERE id = ?", (job["ref_id"],))
     if poll is None or poll["status"] != "open":
         return
-    waiting = poll_state(poll)["waiting"]
-    if waiting:
-        await tg.send_group(bot, boards.dinner_nag(tg.mention_list(waiting)))
+    # Voting is over: there is nobody left to chase, and the box is showing the
+    # pick-a-day prompt. A batch of overdue jobs can hand us a nag that the
+    # deadline already cancelled, so this is checked rather than assumed.
+    if past_deadline(poll):
+        return
+    if poll_state(poll)["waiting"]:
+        await render(bot, poll["id"], bump=True)
     # Re-arm until the deadline closes the poll.
     db.add_job(t.now_utc() + timedelta(hours=db.get_int("dinner_nag_hours")),
                "dinner_nag", poll["id"])
@@ -435,28 +543,26 @@ async def _job_deadline(bot: Bot, job) -> None:
     if poll is None or poll["status"] != "open":
         return
     db.cancel_jobs("dinner_nag", poll["id"])
-    st = poll_state(poll)
-    viable = [d for d in st["days"] if d["viable"]]
-    # The deadline board replaces the live vote board (spec 2.5: one live board).
-    await retire_poll_board(bot, poll["id"])
-    if viable:
-        # Leave the poll open so the lock buttons still work; nagging stops.
-        text, markup = boards.dinner_deadline_viable(poll["id"], viable)
-        await tg.send_group(bot, text, markup)
-        return
-    close_poll(poll["id"], "expired")
-    text, markup = boards.dinner_deadline_none(poll["id"], poll["days"])
-    await tg.send_group(bot, text, markup)
+    # Stamp the close time, so "voting is over" is a fact about the poll rather
+    # than a guess from the clock. render() then switches the same box over to
+    # the pick-a-day prompt - and a bot that was offline past its own deadline
+    # still reads as closed when it wakes up.
+    db.x("UPDATE dinner_polls SET deadline_at = ? WHERE id = ?",
+         (t.iso(t.now_utc()), poll["id"]))
+    await render(bot, poll["id"], bump=True)
 
 
 @scheduler.on("dinner_remind")
 async def _job_remind(bot: Bot, job) -> None:
+    """T-3 / T-1 / day-of: the same dinner card, re-posted with a new headline.
+
+    It has to be a re-post rather than an edit, because an edit pings nobody -
+    and the mentions it carries are only the people who said they were coming.
+    """
     event = db.q1("SELECT * FROM dinner_events WHERE id = ?", (job["ref_id"],))
     if event is None or event["status"] != "upcoming":
         return
-    text, markup = boards.dinner_reminder(event["id"], event["dinner_date"],
-                                          job["payload"] or "t1")
-    await tg.send_group(bot, text, markup)
+    await render_event(bot, event["id"], job["payload"] or "t1", bump=True)
 
 
 @scheduler.on("dinner_done")
@@ -465,4 +571,6 @@ async def _job_done(bot: Bot, job) -> None:
     if event is None or event["status"] != "upcoming":
         return
     db.x("UPDATE dinner_events SET status = 'done' WHERE id = ?", (event["id"],))
-    await tg.send_group(bot, boards.dinner_done(event["dinner_date"]))
+    # Quietly retire the card: an edit, so nobody's phone buzzes at 10pm.
+    text, markup = boards.dinner_event_done(event["dinner_date"])
+    await _show_event(bot, event["id"], text, markup, bump=False)

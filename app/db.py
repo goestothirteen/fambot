@@ -71,7 +71,10 @@ CREATE TABLE IF NOT EXISTS dinner_events (
   created_at  TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS dinner_dropouts (
+CREATE TABLE IF NOT EXISTS dinner_attendees (
+  -- Who is actually expected at a locked dinner: a snapshot of the people
+  -- who ticked the chosen day, taken at lock time so later vote edits or a
+  -- re-run poll cannot rewrite history. This is the list the reminders ping.
   event_id INTEGER NOT NULL,
   user_id  INTEGER NOT NULL,
   PRIMARY KEY (event_id, user_id)

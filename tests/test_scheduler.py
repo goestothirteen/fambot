@@ -119,4 +119,4 @@ async def test_jobs_missed_during_downtime_run_on_the_next_tick(bot, monkeypatch
     monkeypatch.setattr(t, "now_utc", lambda: afternoon)
 
     assert await scheduler.run_due(bot) >= 1
-    assert bot.said("Still waiting on")   # the 6-hourly nag went out
+    assert bot.said("Waiting on:")   # the chase-up went out

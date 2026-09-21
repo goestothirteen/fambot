@@ -123,18 +123,49 @@ async def edit_or_repost(bot: Bot, chat_id: int, message_id: int | None, text: s
     return await send(bot, chat_id, text, markup)
 
 
-async def delete_message(bot: Bot, chat_id: int, message_id: int | None) -> None:
+async def delete_message(bot: Bot, chat_id: int, message_id: int | None) -> bool:
     """Remove a board that has been superseded, so only one live board remains.
 
     Telegram raises when the message is already gone (a user deleted it, or it
-    is too old to delete). That is exactly the state we want, so swallow it.
+    is too old to delete). Already-gone is exactly the state we want, so this
+    swallows the error - but it reports whether the message is really off the
+    screen, because a board the bot could not remove still needs defusing.
     """
     if message_id is None:
-        return
+        return True
     try:
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        return True
     except TelegramError as e:
         log.debug("Could not delete %s (%s) - already gone or too old", message_id, e)
+        return False
+
+
+async def repost(bot: Bot, chat_id: int, message_id: int | None, text: str,
+                 markup: InlineKeyboardMarkup | None = None,
+                 stale_text: str | None = None) -> int | None:
+    """Move a board to the bottom of the chat, keeping the chat at one board.
+
+    Editing a message never pings anyone, so anything that has to reach
+    phones - a reminder, a chase-up - must be a new message. Taking the old
+    one down first is what stops those piling up.
+
+    Without group-admin rights Telegram only lets a bot delete its own
+    messages for 48 hours. When the delete is refused we rewrite the old board
+    into a one-line pointer with no buttons, so the worst case is a stale line
+    rather than two live boards.
+    """
+    removed = await delete_message(bot, chat_id, message_id)
+    new_id = await send(bot, chat_id, text, markup)
+    if not removed and new_id is not None:
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id,
+                text=stale_text or text, reply_markup=None,
+                parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        except TelegramError as e:
+            log.debug("Could not defuse stale board %s: %s", message_id, e)
+    return new_id
 
 
 async def pin(bot: Bot, chat_id: int, message_id: int) -> bool:

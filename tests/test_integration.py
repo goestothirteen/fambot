@@ -45,8 +45,7 @@ async def test_a_week_in_the_life(bot, unregister_all):
     # --- Tuesday: Mom starts a dinner vote with /dinner ---------------------
     bot.reset()
     await main.cmd_dinner(text_update("/dinner", user_id=ids["mom"]), ctx(bot))
-    assert bot.said("Start a dinner vote")
-    await tap(bot, "d|open", ids["mom"])
+    assert bot.said("FAMILY DINNER VOTE")
     poll = dinner.open_poll()
     days = [d.isoformat() for d in dinner.poll_days(poll)]
 
@@ -59,7 +58,9 @@ async def test_a_week_in_the_life(bot, unregister_all):
     job = db.q1("SELECT * FROM jobs WHERE kind='dinner_nag' AND done=0")
     bot.reset()
     await scheduler.HANDLERS["dinner_nag"](bot, job)
-    assert "Luke" in bot.last and "Dawn" not in bot.last
+    assert len(bot.sent) == 1, "the chase-up is the board moving, not a new message"
+    assert f"tg://user?id={ids['luke']}" in bot.last
+    assert f"tg://user?id={ids['dawn']}" not in bot.last
 
     await tap(bot, f"d|v|{poll['id']}|{days[3]}", ids["luke"])
     # Everyone's voted, so the board becomes the admin-only finalize prompt.
@@ -148,13 +149,21 @@ async def test_a_week_in_the_life(bot, unregister_all):
     assert db.has_pending_job("roster_topup")
     assert db.scalar("SELECT COUNT(*) FROM jobs WHERE done=0") > 0
 
-    # --- Saturday: Luke drops out of dinner, the family re-votes ------------
+    # --- Saturday: Luke can't make it, so Mark moves the whole dinner -------
     bot.reset()
-    await tap(bot, f"d|out|{event['id']}", ids["luke"])
-    assert bot.said("Luke can't make dinner")
-    await tap(bot, f"d|revote|{event['id']}", ids["luke"])
+    upd = await tap(bot, f"d|revote|{event['id']}", ids["luke"])
+    assert "Only Mark" in upd.answers[-1]["text"], "kids can't move the dinner"
+    assert dinner.upcoming_event() is not None
+
+    card_id = db.q1("SELECT message_id FROM dinner_events WHERE id=?",
+                    (event["id"],))["message_id"]
+    await tap(bot, f"d|revote|{event['id']}", ids["mark"])
     assert dinner.upcoming_event() is None
-    assert dinner.open_poll() is not None
+    new_poll = dinner.open_poll()
+    assert new_poll is not None
+    # The fresh vote takes over the dinner card rather than sitting beside it.
+    assert new_poll["message_id"] == card_id
+    assert bot.sent == [], "re-opening the vote added nothing to the chat"
 
 
 async def test_the_bot_never_assigns_a_duty_nobody_volunteered_for(bot):
@@ -177,4 +186,4 @@ async def test_the_bot_never_auto_locks_a_dinner(bot):
     job = db.q1("SELECT * FROM jobs WHERE kind='dinner_deadline'")
     await scheduler.HANDLERS["dinner_deadline"](bot, job)
     assert dinner.upcoming_event() is None, "no dinner was booked without a tap"
-    assert any(c.startswith("d|lock|") for c in bot.callbacks())
+    assert any(c.startswith("d|fin|") for c in bot.callbacks())

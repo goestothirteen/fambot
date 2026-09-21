@@ -104,8 +104,14 @@ class FakeBot:
         return [b.callback_data for row in src.markup.inline_keyboard for b in row]
 
     def reset(self) -> None:
+        """Forget everything the bot has done, so a test can watch one moment.
+
+        Deletes are counted as carefully as sends now: "the chat holds one
+        dinner message" is only true if every move takes the old one down.
+        """
         self.sent.clear()
         self.edits.clear()
+        self.deleted.clear()
 
 
 @pytest.fixture
