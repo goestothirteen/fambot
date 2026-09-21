@@ -35,7 +35,7 @@ async def test_each_command_opens_its_flow(bot):
 
     bot.reset()
     await main.cmd_dinner(text_update("/dinner"), ctx(bot))
-    assert bot.said("Start a dinner vote")
+    assert bot.said("FAMILY DINNER VOTE")
 
     bot.reset()
     await main.cmd_rush(text_update("/rush"), ctx(bot))
@@ -154,6 +154,23 @@ async def test_admin_cancel_closes_everything_open(bot):
     assert dinner.open_poll() is None
     assert roster.open_round() is None
     assert helpreq.open_requests() == []
+
+
+async def test_cancel_empties_the_dinner_box_it_closes(bot):
+    """Closing the row is not enough - the board would keep its live buttons."""
+    from app import db, dinner
+    pid = await dinner.open_new(bot, IDS["mark"])
+    board_id = db.q1("SELECT message_id FROM dinner_polls WHERE id=?",
+                     (pid,))["message_id"]
+    bot.reset()
+
+    await main.cmd_cancel(text_update("/cancel", user_id=IDS["mark"]), ctx(bot))
+
+    assert bot.sent == [], "cancelling adds nothing to the group"
+    assert bot.edits[-1].message_id == board_id
+    assert "Dinner vote cancelled" in bot.edits[-1].text
+    assert bot.edits[-1].markup is not None
+    assert bot.edits[-1].markup.inline_keyboard == ()
 
 
 async def test_non_admin_cannot_cancel(bot):

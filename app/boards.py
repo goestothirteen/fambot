@@ -57,8 +57,10 @@ def help_text() -> str:
         "Type <b>/</b> in the message box and Telegram lists these for you. "
         "Tap one, and everything after that is buttons.\n\n"
         f"<code>{C_DINNER}</code> {L_DINNER} — start a vote for the next family "
-        "dinner. Tap every day you're free; when all five of us are free on the "
-        "same day, anyone can lock it in.\n\n"
+        "dinner. Tap every day you're free. If a day suits all five of us, "
+        "anyone can lock it in; otherwise the admin picks the day that works "
+        "for the most people. Run it again any time — it moves the same "
+        "dinner box down to you rather than posting another one.\n\n"
         f"<code>{C_RUSH}</code> {L_RUSH} — ask for help with Rush. Pick a day and "
         "a time, say whether you want company or someone to take the walk over, "
         "and it goes to the group.\n\n"
@@ -125,19 +127,31 @@ def whoami(name: str | None, user_id: int) -> str:
 
 
 # --- Feature A: dinner ----------------------------------------------------
+# One box, always. Every dinner state - vote, confirm, locked, reminder,
+# cancelled, done - is the same single message being rewritten. The only time
+# a new message appears is when something must actually reach phones, and
+# then the old one is taken down first (see dinner.py).
 
-def dinner_start_prompt(days: int) -> tuple[str, M]:
-    return (f"🍜 Start a dinner vote for the next {days} days?",
-            M([[B("✅ Start", callback_data=cb("d", "open")),
-                B("✖ Never mind", callback_data=cb("x", "close"))]]))
+def dinner_board_moved() -> str:
+    """Left in place of a board the bot was not allowed to delete.
+
+    Without group-admin rights Telegram only lets the bot remove its own
+    messages for 48 hours. Past that we at least strip the board of its
+    buttons so nobody taps a dead one.
+    """
+    return "🍜 <i>Dinner moved to the bottom of the chat ⬇</i>"
 
 
-def dinner_poll(poll_id: int, days: list[dict], voted: list[str], waiting: list[str],
+def dinner_poll(poll_id: int, days: list[dict], voted: list[str], waiting: str,
                 deadline, missing: list[str]) -> tuple[str, M]:
     """The live vote board.
 
-    `days` items: {date, count, required, names, viable}.
-    Buttons show the aggregate tally rather than a personal tick — an inline
+    `days` items: {date, count, required, names, viable}. `waiting` arrives as
+    ready-made mention HTML, not names: when this board is re-posted to chase
+    non-voters the mentions are what actually pings them, so the nag needs no
+    message of its own.
+
+    Buttons show the aggregate tally rather than a personal tick - an inline
     keyboard is shared by everyone in the group, so it cannot show one
     person's own state. Who picked what is spelled out in the text instead,
     and the tapper gets a private toast confirming their own toggle.
@@ -156,7 +170,7 @@ def dinner_poll(poll_id: int, days: list[dict], voted: list[str], waiting: list[
     if voted:
         lines.append("✅ Voted: " + plain_list([esc(n) for n in voted]))
     if waiting:
-        lines.append("⏳ Waiting on: " + plain_list([esc(n) for n in waiting]))
+        lines.append("⏳ Waiting on: " + waiting)
     if missing:
         lines.append("⚠️ Not registered yet, so we can't reach 5/5: "
                      + plain_list([esc(n) for n in missing]))
@@ -180,51 +194,18 @@ def dinner_lock_confirm(poll_id: int, day: str) -> tuple[str, M]:
                 B("⬅ Back", callback_data=cb("d", "board", poll_id))]]))
 
 
-def dinner_locked(event_id: int, day: str, by: str) -> tuple[str, M]:
-    return (f"🍜 <b>DINNER IS ON — {t.fmt_date(day)}</b>\n\n"
-            f"{esc(by)} locked it in.\n"
-            "I'll remind everyone closer to the day.",
-            M([[B("❌ I can't make it any more", callback_data=cb("d", "out", event_id))]]))
+def dinner_finalize(poll_id: int, ranked: list[dict], admin_name: str,
+                    closed: bool) -> tuple[str, M]:
+    """Admin-only prompt to pick the day.
 
-
-def dinner_view_locked(event_id: int, day: str, dropouts: list[str],
-                       admin: bool) -> tuple[str, M]:
-    lines = [f"🍜 <b>Family dinner — {t.fmt_date(day)}</b>", "", "It's locked in."]
-    if dropouts:
-        lines += ["", "😔 Can't make it: " + plain_list([esc(n) for n in dropouts])]
-    rows = [[B("❌ I can't make it any more", callback_data=cb("d", "out", event_id))]]
-    if admin:
-        rows.append([B("✖ Cancel dinner", callback_data=cb("d", "ecancel", event_id))])
-    return "\n".join(lines), M(rows)
-
-
-def dinner_nag(mentions: str) -> str:
-    return f"🍜 Still waiting on {mentions} to vote for dinner!"
-
-
-def dinner_deadline_viable(poll_id: int, days: list[dict]) -> tuple[str, M]:
-    lines = ["🍜 <b>Time's up on the dinner vote.</b>", "",
-             "These days work for everyone — tap one to lock it in:"]
-    rows = [[B(f"🔒 Lock in {t.fmt_date(d['date'])}",
-               callback_data=cb("d", "lock", poll_id, d["date"]))]
-            for d in days if d["viable"]]
-    return "\n".join(lines), M(rows)
-
-
-def dinner_deadline_none(poll_id: int, days: int) -> tuple[str, M]:
-    return ("😔 <b>No day worked for all five of us.</b>\n\nTry the next stretch of days?",
-            M([[B(f"🔁 Try the next {days} days", callback_data=cb("d", "ext", poll_id))],
-               [B("✖ Drop it for now", callback_data=cb("d", "drop", poll_id))]]))
-
-
-def dinner_finalize(poll_id: int, ranked: list[dict], admin_name: str) -> tuple[str, M]:
-    """Admin-only prompt to finalize a day once everyone has voted.
-
+    Shown once everyone has voted, and again when voting time runs out - in
+    both cases the admin can take any day with at least one vote, so "four of
+    us can make Friday" is a bookable outcome rather than a dead end.
     `ranked` items: {date, count, required, names}, already sorted best-first.
-    Lists every candidate day with at least one vote and who can make it. Only
-    the admin can actually tap a day — non-admins get a toast (see below).
     """
-    lines = ["🍜 <b>Everyone's voted — pick the dinner day.</b>", "",
+    head = ("🍜 <b>Time's up on the dinner vote.</b>" if closed
+            else "🍜 <b>Everyone's voted — pick the dinner day.</b>")
+    lines = [head, "",
              f"{esc(admin_name)} can lock in any day below (top one works for "
              "the most people):", ""]
     for d in ranked:
@@ -238,54 +219,62 @@ def dinner_finalize(poll_id: int, ranked: list[dict], admin_name: str) -> tuple[
     return "\n".join(lines), M(rows)
 
 
-def dinner_finalize_none(poll_id: int, days: int) -> tuple[str, M]:
-    return ("😔 <b>Everyone's voted, but nobody can make any day.</b>\n\n"
-            "Try the next stretch of days?",
+def dinner_finalize_none(poll_id: int, days: int, closed: bool) -> tuple[str, M]:
+    head = ("😔 <b>Voting's closed and nobody picked a day.</b>" if closed
+            else "😔 <b>Everyone's voted, but nobody can make any day.</b>")
+    return (f"{head}\n\nTry the next stretch of days?",
             M([[B(f"🔁 Try the next {days} days", callback_data=cb("d", "ext", poll_id))],
                [B("✖ Drop it for now", callback_data=cb("d", "drop", poll_id))]]))
 
 
-def dinner_finalize_not_admin(admin_name: str) -> str:
-    return f"Only {admin_name} can finalize the date."
+def dinner_not_admin(admin_name: str) -> str:
+    return f"Only {admin_name} can change the dinner."
 
 
-def dinner_reminder(event_id: int, day: str, when: str) -> tuple[str, M]:
-    head = {"t3": f"🍜 Family dinner is in 3 days — <b>{t.fmt_date(day)}</b>.",
-            "t1": f"🍜 Family dinner is <b>tomorrow</b> ({t.fmt_date(day)}).",
-            "day": f"🍜 <b>Family dinner is tonight!</b> ({t.fmt_date(day)})"}[when]
-    return (f"{head}\nStill good?",
-            M([[B("✅ Still on", callback_data=cb("d", "in", event_id)),
-                B("❌ Can't make it", callback_data=cb("d", "out", event_id))]]))
+# Headline per stage of a locked dinner. The same box carries all of them.
+_DINNER_HEADS = {
+    "locked": "🍜 <b>DINNER IS ON — {day}</b>",
+    "t3": "🍜 <b>Family dinner in 3 days — {day}</b>",
+    "t1": "🍜 <b>Family dinner is tomorrow — {day}</b>",
+    "day": "🍜 <b>Family dinner is tonight — {day}</b>",
+}
 
 
-def dinner_dropout(event_id: int, who: str, day: str) -> tuple[str, M]:
-    return (f"😔 {who} can't make dinner on {t.fmt_date(day)} any more.\n\nWhat now?",
-            M([[B("🔁 Find another day", callback_data=cb("d", "revote", event_id))],
-               [B("✖ Cancel this dinner", callback_data=cb("d", "ecancel", event_id))]]))
+def dinner_event_card(event_id: int, day: str, coming: str, absent: list[str],
+                      phase: str, locked_by: str | None = None) -> tuple[str, M]:
+    """The one box for a locked-in dinner, from lock right through to the day.
+
+    `coming` is mention HTML for the people who voted for this date, so every
+    time the card is re-posted as a reminder it pings exactly them and nobody
+    else. Nobody is asked to re-confirm: the guest list was settled by the
+    vote, and only the admin changes the plan after that.
+    """
+    lines = [_DINNER_HEADS[phase].format(day=t.fmt_date(day)), ""]
+    lines.append("🙋 Coming: " + coming if coming
+                 else "🙋 Nobody ticked this day, so I don't know who's coming.")
+    if absent:
+        lines.append("😴 Not coming: " + plain_list([esc(n) for n in absent]))
+    if phase == "locked":
+        who = f"{esc(locked_by)} locked it in. " if locked_by else ""
+        lines += ["", f"<i>{who}I'll bump this up again nearer the day.</i>"]
+    rows = [[B("🔁 Pick another day", callback_data=cb("d", "revote", event_id)),
+             B("✖ Cancel dinner", callback_data=cb("d", "ecancel", event_id))]]
+    return "\n".join(lines), M(rows)
 
 
-def dinner_back_in(who: str, day: str) -> str:
-    return f"👍 {who} is back on for {t.fmt_date(day)}."
+def dinner_event_cancelled(day: str) -> tuple[str, M]:
+    return (f"✖ <b>Dinner on {t.fmt_date(day)} is off.</b>",
+            M([[B("🍜 Start a new vote", callback_data=cb("d", "open"))]]))
 
 
-def dinner_cancelled(day: str) -> str:
-    return f"✖ Dinner on {t.fmt_date(day)} is cancelled."
+def dinner_event_done(day: str) -> tuple[str, M]:
+    return (f"🥢 <i>Family dinner on {t.fmt_date(day)} — done. Hope it was good!</i>",
+            M([]))
 
 
-def dinner_poll_cancelled() -> str:
-    return "✖ Dinner vote cancelled."
-
-
-def dinner_dropped() -> str:
-    return "OK — no dinner vote for now. Tap 🍜 Dinner whenever you want to try again."
-
-
-def dinner_done(day: str) -> str:
-    return f"🥢 Hope dinner was good! ({t.fmt_date(day)})"
-
-
-def dinner_already_locked(day: str) -> str:
-    return f"Dinner is already locked in for {t.fmt_date(day)} 🍜"
+def dinner_vote_cancelled() -> tuple[str, M]:
+    return ("✖ <i>Dinner vote cancelled.</i>\n"
+            f"<code>{C_DINNER}</code> whenever you want to try again.", M([]))
 
 
 # --- Feature B: help requests ---------------------------------------------

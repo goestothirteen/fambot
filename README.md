@@ -9,8 +9,13 @@ message box.
 Three features, one engine: someone opens a request → the bot collects
 responses → a human confirms the outcome → the bot reminds → dropouts reopen it.
 
-- **🍜 Dinner** (`/dinner`) — a 7-day multi-select vote. A day only becomes bookable when
-  all five mark it free; a person then taps 🔒 to lock it. The bot never picks.
+- **🍜 Dinner** (`/dinner`) — a 7-day multi-select vote that lives in **one message**.
+  If a day suits all five, anyone taps 🔒 to lock it; otherwise the admin picks the
+  day that works for the most people. The bot never picks. From the vote through to
+  the night itself it rewrites that same message rather than posting new ones — and
+  when a reminder has to actually reach phones, it takes the old one down first.
+  Reminders tag exactly the people who said they could come, and nobody is asked to
+  re-confirm; only the admin cancels or moves a dinner.
 - **🐕 Rush** (`/rush`) — dog-walk help. "Come along" is open to any kid; "take over the
   walk" needs a driver, because taking over means driving.
 - **📅 Roster** (`/roster`) — home cover on request, plus a rolling Sunday-evening roster
@@ -29,7 +34,7 @@ cp .env.example .env            # add your BOT_TOKEN
 DB_PATH=./data/fambot.db MEMBERS_FILE=./members.example.json python -m app.main
 ```
 
-Run the tests — 125 of them, all offline, no network and no Telegram:
+Run the tests — 131 of them, all offline, no network and no Telegram:
 
 ```bash
 pip install pytest pytest-asyncio
