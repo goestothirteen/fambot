@@ -25,6 +25,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "quiet_end": "09:00",
     # Dinner
     "dinner_window_days": "7",
+    "dinner_max_range_days": "31",  # longest stretch one vote can cover
+    "dinner_horizon_days": "56",    # how far ahead a vote can start
     "dinner_nag_hours": "24",  # one chase-up on a 48h vote, not eight
     "poll_deadline_hours": "48",
     "reminder_hour": "10",          # T-3 / T-1 / day-of reminders, SGT
