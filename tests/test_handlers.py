@@ -35,7 +35,7 @@ async def test_each_command_opens_its_flow(bot):
 
     bot.reset()
     await main.cmd_dinner(text_update("/dinner"), ctx(bot))
-    assert bot.said("FAMILY DINNER VOTE")
+    assert bot.said("Which days should we vote on?")
 
     bot.reset()
     await main.cmd_rush(text_update("/rush"), ctx(bot))

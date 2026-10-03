@@ -7,8 +7,8 @@ from tests.conftest import GROUP, IDS, ctx, fake_update, settle
 from tests.test_handlers import text_update
 
 
-async def tap(bot, data, who):
-    upd = fake_update(data, IDS[who] if isinstance(who, str) else who)
+async def tap(bot, data, who, message_id=500):
+    upd = fake_update(data, IDS[who] if isinstance(who, str) else who, message_id)
     for handler, prefix in ((dinner.on_callback, "d|"), (helpreq.on_callback, "h|"),
                             (roster.on_callback, "r|"), (main.on_setup_cb, "s|")):
         if data.startswith(prefix):
@@ -45,6 +45,9 @@ async def test_a_week_in_the_life(bot, unregister_all):
     # --- Tuesday: Mom starts a dinner vote with /dinner ---------------------
     bot.reset()
     await main.cmd_dinner(text_update("/dinner", user_id=ids["mom"]), ctx(bot))
+    assert bot.said("Which days should we vote on?")
+    # She takes the default: the next seven days.
+    await tap(bot, bot.callbacks()[0], ids["mom"], bot.sent[-1].message_id)
     assert bot.said("FAMILY DINNER VOTE")
     poll = dinner.open_poll()
     days = [d.isoformat() for d in dinner.poll_days(poll)]
@@ -157,7 +160,8 @@ async def test_a_week_in_the_life(bot, unregister_all):
 
     card_id = db.q1("SELECT message_id FROM dinner_events WHERE id=?",
                     (event["id"],))["message_id"]
-    await tap(bot, f"d|revote|{event['id']}", ids["mark"])
+    await tap(bot, f"d|revote|{event['id']}", ids["mark"], card_id)
+    await tap(bot, bot.callbacks()[0], ids["mark"], card_id)
     assert dinner.upcoming_event() is None
     new_poll = dinner.open_poll()
     assert new_poll is not None

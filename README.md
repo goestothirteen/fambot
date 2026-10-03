@@ -9,7 +9,8 @@ message box.
 Three features, one engine: someone opens a request → the bot collects
 responses → a human confirms the outcome → the bot reminds → dropouts reopen it.
 
-- **🍜 Dinner** (`/dinner`) — a 7-day multi-select vote that lives in **one message**.
+- **🍜 Dinner** (`/dinner`) — a multi-select vote that lives in **one message**. It covers
+  the next 7 days, or any first-to-last range of dates picked on buttons (up to a month).
   If a day suits all five, anyone taps 🔒 to lock it; otherwise the admin picks the
   day that works for the most people. The bot never picks. From the vote through to
   the night itself it rewrites that same message rather than posting new ones — and

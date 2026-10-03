@@ -267,7 +267,12 @@ async def test_revote_cancels_the_dinner_and_opens_a_fresh_poll(bot):
     await dinner.lock(bot, pid, day, IDS["mark"])
     event = dinner.upcoming_event()
 
-    await dinner.on_callback(fake_update(f"d|revote|{event['id']}", IDS["mark"]), ctx(bot))
+    card = event["message_id"]
+    await dinner.on_callback(
+        fake_update(f"d|revote|{event['id']}", IDS["mark"], card), ctx(bot))
+    # The card is now the date picker; the dinner stands until dates are chosen.
+    assert dinner.upcoming_event() is not None
+    await dinner.on_callback(fake_update(bot.callbacks()[0], IDS["mark"], card), ctx(bot))
     assert db.q1("SELECT status FROM dinner_events WHERE id=?",
                  (event["id"],))["status"] == "cancelled"
     assert not db.has_pending_job("dinner_remind", event["id"])
@@ -627,3 +632,107 @@ async def test_finalize_keeps_one_live_board(bot):
     board_after = db.q1("SELECT message_id FROM dinner_polls WHERE id=?", (pid,))["message_id"]
     assert board_after == board_before
     assert bot.edits and "Everyone's voted" in bot.edits[-1].text
+
+
+# --- choosing the dates ----------------------------------------------------
+
+async def pick(bot, data, slug="mark", box=500):
+    upd = fake_update(data, IDS[slug], box)
+    await dinner.on_callback(upd, ctx(bot))
+    return upd
+
+
+async def test_dinner_starts_with_the_date_picker_not_a_vote(bot):
+    await dinner.entry(bot, IDS["mom"])
+    assert dinner.open_poll() is None
+    assert "Which days" in bot.last
+    first = t.today_local() + timedelta(days=1)
+    last = first + timedelta(days=6)
+    assert bot.callbacks() == [f"d|go|{first}|{last}", "d|ps|0", "d|pc"]
+
+
+async def test_the_default_button_is_still_the_next_seven_days(bot):
+    await dinner.entry(bot, IDS["mom"])
+    box = bot.sent[-1].message_id
+    await pick(bot, bot.callbacks()[0], "mom", box)
+
+    poll = dinner.open_poll()
+    assert len(days_of(poll["id"])) == 7
+    # The picker became the vote board: same message, nothing new posted.
+    assert poll["message_id"] == box
+    assert len(bot.sent) == 1
+
+
+async def test_a_chosen_range_covers_every_day_in_between(bot):
+    first = t.today_local() + timedelta(days=10)
+    last = first + timedelta(days=11)
+    await dinner.entry(bot, IDS["mark"])
+    box = bot.sent[-1].message_id
+
+    await pick(bot, "d|ps|0", box=box)
+    assert f"d|pe|{first}|0" in bot.callbacks()
+    await pick(bot, f"d|pe|{first}|0", box=box)
+    assert f"d|go|{first}|{last}" in bot.callbacks()
+    await pick(bot, f"d|go|{first}|{last}", box=box)
+
+    days = days_of(dinner.open_poll()["id"])
+    assert len(days) == 12
+    assert days[0] == first.isoformat() and days[-1] == last.isoformat()
+    for day in days:
+        assert t.fmt_date(day) in bot.board
+
+
+async def test_a_single_day_is_a_valid_range(bot):
+    day = t.today_local() + timedelta(days=3)
+    await pick(bot, f"d|go|{day}|{day}")
+    assert days_of(dinner.open_poll()["id"]) == [day.isoformat()]
+
+
+async def test_bad_ranges_are_refused(bot):
+    today = t.today_local()
+    far = today + timedelta(days=5)
+    for first, last in ((today, far),                       # starts today
+                        (far, far - timedelta(days=1)),      # ends before it starts
+                        (far, far + timedelta(days=40))):    # longer than a month
+        upd = await pick(bot, f"d|go|{first}|{last}")
+        assert upd.answers[-1]["alert"]
+        assert dinner.open_poll() is None
+
+
+async def test_dinner_twice_before_picking_moves_the_one_picker(bot):
+    await dinner.entry(bot, IDS["mom"])
+    first_box = bot.sent[-1].message_id
+    await dinner.entry(bot, IDS["dad"])
+    assert first_box in bot.deleted
+    assert len(bot.sent) == 2
+
+
+async def test_never_mind_on_a_moved_dinner_puts_the_card_back(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    day = days_of(pid)[0]
+    await everyone_votes(bot, pid, day)
+    await dinner.lock(bot, pid, day, IDS["mark"])
+    event = dinner.upcoming_event()
+    card = event["message_id"]
+
+    await pick(bot, f"d|revote|{event['id']}", box=card)
+    assert "Which days" in bot.board
+    await pick(bot, "d|pc", box=card)
+
+    assert dinner.upcoming_event()["id"] == event["id"]
+    assert "Coming:" in bot.board and f"d|revote|{event['id']}" in bot.callbacks()
+    assert db.has_pending_job("dinner_done", event["id"])
+
+
+async def test_only_the_admin_can_finish_moving_a_dinner(bot):
+    pid = await dinner.open_new(bot, IDS["mark"])
+    day = days_of(pid)[0]
+    await everyone_votes(bot, pid, day)
+    await dinner.lock(bot, pid, day, IDS["mark"])
+    event = dinner.upcoming_event()
+    card = event["message_id"]
+    await pick(bot, f"d|revote|{event['id']}", box=card)
+
+    upd = await pick(bot, bot.callbacks()[0], "luke", card)
+    assert "Only Mark" in upd.answers[-1]["text"]
+    assert dinner.upcoming_event() is not None and dinner.open_poll() is None

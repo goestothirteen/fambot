@@ -1,8 +1,9 @@
 """Feature A - the dinner scheduler.
 
-The engine: open a 7-day poll, everyone multi-selects, a day becomes viable
-only when all five have ticked it, and then a human locks it in. The bot
-never picks the day itself (spec 2.2).
+The engine: open a poll over a run of days (the next 7, or any first-to-last
+range picked on buttons), everyone multi-selects, a day becomes viable only
+when all five have ticked it, and then a human locks it in. The bot never
+picks the day itself (spec 2.2).
 
 One box, always. A dinner occupies exactly one message in the family group
 from the moment a vote opens until the night itself: the vote board, the lock
@@ -243,11 +244,12 @@ async def render_event(bot: Bot, event_id: int, phase: str | None = None,
 # --- opening / closing -----------------------------------------------------
 
 async def open_new(bot: Bot, opened_by: int | None, start: date | None = None,
-                   adopt_message_id: int | None = None) -> int:
+                   adopt_message_id: int | None = None,
+                   days: int | None = None) -> int:
     """Start a vote. `adopt_message_id` reuses the box the last one left behind."""
-    days = db.get_int("dinner_window_days")
+    days = days or db.get_int("dinner_window_days")
     # Candidate days start tomorrow - dinner needs runway (spec 5.2).
-    first = start or (t.today_local() + timedelta(days=1))
+    first = start or _earliest()
     deadline = t.now_utc() + timedelta(hours=db.get_int("poll_deadline_hours"))
     cur = db.x(
         "INSERT INTO dinner_polls (status, opened_by, opened_at, deadline_at, "
@@ -334,12 +336,116 @@ def cancel_event(event_id: int) -> str | None:
     return row["dinner_date"]
 
 
-def _release_event_box(event_id: int) -> int | None:
-    event = db.q1("SELECT message_id FROM dinner_events WHERE id = ?", (event_id,))
-    if event is None:
-        return None
-    db.x("UPDATE dinner_events SET message_id = NULL WHERE id = ?", (event_id,))
-    return event["message_id"]
+# --- choosing the dates ----------------------------------------------------
+# The picker is the dinner box before a vote exists: the same message walks
+# through "which days?" -> first day -> last day and then becomes the vote
+# board. Like every other flow it is stateless - the chosen start rides in
+# the callback token - so the box is simply whichever message was tapped.
+
+PICK_PAGE = 14                          # dates per picker page
+_PICKER = "dinner_picker_message_id"    # the picker /dinner last posted
+
+
+def _earliest() -> date:
+    return t.today_local() + timedelta(days=1)
+
+
+def _pages(total: int) -> int:
+    return max(1, -(-total // PICK_PAGE))
+
+
+async def _show_picker(bot: Bot, message_id: int | None, text, markup,
+                       bump: bool = False) -> None:
+    chat_id = db.group_chat_id()
+    if chat_id is None:
+        return
+    tracked = db.get_setting(_PICKER)
+    if bump:
+        new_id = await tg.repost(bot, chat_id, message_id, text, markup,
+                                 boards.dinner_board_moved())
+    else:
+        new_id = await tg.edit_or_repost(bot, chat_id, message_id, text, markup)
+    if bump or (tracked and tracked == str(message_id)):
+        db.set_setting(_PICKER, new_id or "")
+    if new_id and message_id is not None and new_id != message_id:
+        # The picker sat on a dinner card that could not be edited: the card
+        # follows it, so the dinner still knows which message is its box.
+        db.x("UPDATE dinner_events SET message_id = ? WHERE message_id = ?",
+             (new_id, message_id))
+
+
+def _forget_picker(message_id: int) -> None:
+    if db.get_setting(_PICKER) == str(message_id):
+        db.set_setting(_PICKER, "")
+
+
+async def _picker_home(bot: Bot, message_id: int | None, bump: bool = False) -> None:
+    text, markup = boards.dinner_when(_earliest(), db.get_int("dinner_window_days"))
+    await _show_picker(bot, message_id, text, markup, bump)
+
+
+async def _picker_start(bot: Bot, box: int, page: int) -> None:
+    horizon = db.get_int("dinner_horizon_days")
+    page = min(max(page, 0), _pages(horizon) - 1)
+    dates = t.date_range(horizon)[page * PICK_PAGE:(page + 1) * PICK_PAGE]
+    text, markup = boards.dinner_pick_start(dates, page, _pages(horizon))
+    await _show_picker(bot, box, text, markup)
+
+
+async def _picker_end(bot: Bot, box: int, start: str, page: int) -> None:
+    longest = db.get_int("dinner_max_range_days")
+    page = min(max(page, 0), _pages(longest) - 1)
+    dates = t.date_range(longest, t.parse_date(start))
+    dates = dates[page * PICK_PAGE:(page + 1) * PICK_PAGE]
+    text, markup = boards.dinner_pick_end(start, dates, page, _pages(longest))
+    await _show_picker(bot, box, text, markup)
+
+
+async def _picker_close(bot: Bot, box: int) -> None:
+    """Never mind. A picker opened over a locked dinner hands the card back."""
+    event = upcoming_event()
+    if event is not None and event["message_id"] == box:
+        await render_event(bot, event["id"])
+        return
+    text, markup = boards.dinner_vote_cancelled()
+    await _show_picker(bot, box, text, markup)
+    _forget_picker(box)
+
+
+async def _start_range(update, bot: Bot, box: int, first_s: str, last_s: str,
+                       user_id: int) -> None:
+    """The last tap of the picker: open the vote over first..last inclusive."""
+    try:
+        first, last = t.parse_date(first_s), t.parse_date(last_s)
+    except ValueError:
+        await tg.toast(update, boards.dinner_dates_stale(), alert=True)
+        return
+    days = (last - first).days + 1
+    # A picker left overnight still offers yesterday's "tomorrow".
+    if first < _earliest() or not 1 <= days <= db.get_int("dinner_max_range_days"):
+        await tg.toast(update, boards.dinner_dates_stale(), alert=True)
+        await _picker_home(bot, box)
+        return
+    if open_poll() is not None:
+        await tg.toast(update, boards.dinner_already_running(), alert=True)
+        return
+    event = upcoming_event()
+    if event is not None:
+        # Only reachable by design from "Pick another day" on the dinner card:
+        # the dinner is dropped now, at the moment its replacement vote opens,
+        # so backing out of the picker leaves the dinner standing.
+        if event["message_id"] != box:
+            await tg.toast(update, boards.dinner_already_running(), alert=True)
+            return
+        if not db.is_admin(user_id):
+            await tg.toast(update, boards.dinner_not_admin(_admin_name()), alert=True)
+            return
+        cancel_event(event["id"])
+    await tg.toast(update, "")
+    # Whatever owned this message lets go first, so only one row owns it.
+    db.x("UPDATE dinner_events SET message_id = NULL WHERE message_id = ?", (box,))
+    _forget_picker(box)
+    await open_new(bot, user_id, first, adopt_message_id=box, days=days)
 
 
 # --- entry point (/dinner) -------------------------------------------------
@@ -350,7 +456,8 @@ async def entry(bot: Bot, user_id: int) -> None:
     If a dinner is already in flight, the existing box is moved down to the
     bottom where the asker is looking - same single message, no duplicate
     board, nothing to scroll back for. Only a genuinely fresh start creates
-    anything.
+    anything, and what it creates is the date picker - which is itself moved
+    rather than repeated if /dinner is sent again before anyone picks.
     """
     event = upcoming_event()
     if event is not None:
@@ -362,7 +469,8 @@ async def entry(bot: Bot, user_id: int) -> None:
         await render(bot, poll["id"], bump=True)
         return
 
-    await open_new(bot, user_id)
+    tracked = db.get_setting(_PICKER)
+    await _picker_home(bot, int(tracked) if tracked else None, bump=True)
 
 
 # --- callbacks -------------------------------------------------------------
@@ -385,11 +493,31 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await tg.toast(update, "")
         if open_poll() is None and upcoming_event() is None:
             # Take over whichever box the tap came from, so a finished dinner
-            # turns into the new vote rather than sitting beside it. The old
-            # event lets go of the message first, so only one row owns it.
-            box = update.callback_query.message.message_id
-            db.x("UPDATE dinner_events SET message_id = NULL WHERE message_id = ?", (box,))
-            await open_new(bot, user.id, adopt_message_id=box)
+            # turns into the picker, and then the new vote, rather than
+            # sitting beside it.
+            await _picker_home(bot, update.callback_query.message.message_id)
+
+    elif action == "pm":
+        await tg.toast(update, "")
+        await _picker_home(bot, update.callback_query.message.message_id)
+
+    elif action == "ps":
+        await tg.toast(update, "")
+        await _picker_start(bot, update.callback_query.message.message_id,
+                            int(parts[2]))
+
+    elif action == "pe":
+        await tg.toast(update, "")
+        await _picker_end(bot, update.callback_query.message.message_id,
+                          parts[2], int(parts[3]))
+
+    elif action == "pc":
+        await tg.toast(update, "")
+        await _picker_close(bot, update.callback_query.message.message_id)
+
+    elif action == "go":
+        await _start_range(update, bot, update.callback_query.message.message_id,
+                           parts[2], parts[3], user.id)
 
     elif action == "board":
         await tg.toast(update, "")
@@ -454,18 +582,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await open_new(bot, user.id, start, adopt_message_id=_release_box(poll_id))
 
     elif action == "revote":
-        # Admin changed their mind: drop this dinner and re-open the vote in
-        # the same box.
+        # Admin changed their mind: the dinner card turns into the date picker.
+        # The dinner itself is only dropped once new dates are chosen (see
+        # _start_range), so "Never mind" puts the card straight back.
         event_id = int(parts[2])
         if not db.is_admin(user.id):
             await tg.toast(update, boards.dinner_not_admin(_admin_name()), alert=True)
             return
-        if cancel_event(event_id) is None:
+        event = db.q1("SELECT * FROM dinner_events WHERE id = ?", (event_id,))
+        if event is None or event["status"] != "upcoming":
             await tg.toast(update, "That dinner isn't on any more.", alert=True)
             return
         await tg.toast(update, "")
-        await open_new(bot, user.id,
-                       adopt_message_id=_release_event_box(event_id))
+        await _picker_home(bot, update.callback_query.message.message_id)
 
     elif action == "ecancel":
         event_id = int(parts[2])

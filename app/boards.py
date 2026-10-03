@@ -57,7 +57,9 @@ def help_text() -> str:
         "Type <b>/</b> in the message box and Telegram lists these for you. "
         "Tap one, and everything after that is buttons.\n\n"
         f"<code>{C_DINNER}</code> {L_DINNER} — start a vote for the next family "
-        "dinner. Tap every day you're free. If a day suits all five of us, "
+        "dinner. Take the next 7 days, or choose your own first and last day "
+        "and every day in between goes on the vote. Tap every day you're "
+        "free. If a day suits all five of us, "
         "anyone can lock it in; otherwise the admin picks the day that works "
         "for the most people. Run it again any time — it moves the same "
         "dinner box down to you rather than posting another one.\n\n"
@@ -142,6 +144,72 @@ def dinner_board_moved() -> str:
     return "🍜 <i>Dinner moved to the bottom of the chat ⬇</i>"
 
 
+def dinner_when(first, days: int) -> tuple[str, M]:
+    """The first thing /dinner shows: which dates go on the vote.
+
+    `first` is the earliest day a dinner can be (tomorrow). The top button is
+    the old behaviour - the next `days` days - so the common case stays one tap.
+    """
+    last = first + timedelta(days=days - 1)
+    return ("🍜 <b>FAMILY DINNER</b>\nWhich days should we vote on?",
+            M([[B(f"Next {days} days ({t.fmt_date(first)} – {t.fmt_date(last)})",
+                  callback_data=cb("d", "go", first.isoformat(), last.isoformat()))],
+               [B("📆 Choose the dates", callback_data=cb("d", "ps", 0))],
+               [B("✖ Never mind", callback_data=cb("d", "pc"))]]))
+
+
+def _date_grid(dates: list, token) -> list[list[B]]:
+    rows, row = [], []
+    for dd in dates:
+        row.append(B(t.fmt_date(dd), callback_data=token(dd)))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return rows
+
+
+def dinner_pick_start(dates: list, page: int, pages: int) -> tuple[str, M]:
+    rows = _date_grid(dates, lambda dd: cb("d", "pe", dd.isoformat(), 0))
+    nav = []
+    if page > 0:
+        nav.append(B("⬅ Earlier", callback_data=cb("d", "ps", page - 1)))
+    if page < pages - 1:
+        nav.append(B("Later ➡", callback_data=cb("d", "ps", page + 1)))
+    if nav:
+        rows.append(nav)
+    rows.append([B("⬅ Back", callback_data=cb("d", "pm")),
+                 B("✖ Never mind", callback_data=cb("d", "pc"))])
+    return ("🍜 <b>FAMILY DINNER</b>\n📆 Step 1 of 2 — tap the <b>first</b> day "
+            "to vote on.", M(rows))
+
+
+def dinner_pick_end(start: str, dates: list, page: int, pages: int) -> tuple[str, M]:
+    """`dates` begins at `start` itself on page 0, so one tap can mean one day."""
+    rows = _date_grid(dates, lambda dd: cb("d", "go", start, dd.isoformat()))
+    nav = []
+    if page > 0:
+        nav.append(B("⬅ Earlier", callback_data=cb("d", "pe", start, page - 1)))
+    if page < pages - 1:
+        nav.append(B("Later ➡", callback_data=cb("d", "pe", start, page + 1)))
+    if nav:
+        rows.append(nav)
+    rows.append([B("⬅ Back", callback_data=cb("d", "ps", 0)),
+                 B("✖ Never mind", callback_data=cb("d", "pc"))])
+    return (f"🍜 <b>FAMILY DINNER</b>\n📆 Step 2 of 2 — starting "
+            f"<b>{t.fmt_date(start)}</b>. Now tap the <b>last</b> day.\n"
+            "Every day in between goes on the vote.", M(rows))
+
+
+def dinner_dates_stale() -> str:
+    return "Those dates don't work any more — pick again."
+
+
+def dinner_already_running() -> str:
+    return "There's already a dinner on the go."
+
+
 def dinner_poll(poll_id: int, days: list[dict], voted: list[str], waiting: str,
                 deadline, missing: list[str]) -> tuple[str, M]:
     """The live vote board.
@@ -176,9 +244,12 @@ def dinner_poll(poll_id: int, days: list[dict], voted: list[str], waiting: str,
                      + plain_list([esc(n) for n in missing]))
     lines += ["", f"<i>Voting closes {t.fmt_datetime(deadline)}.</i>"]
 
-    rows = [[B(f"{'⭐ ' if d['viable'] else ''}{t.fmt_date(d['date'])}  ·  "
-               f"{d['count']}/{d['required']}",
-               callback_data=cb("d", "v", poll_id, d["date"]))] for d in days]
+    btns = [B(f"{'⭐ ' if d['viable'] else ''}{t.fmt_date(d['date'])}  ·  "
+              f"{d['count']}/{d['required']}",
+              callback_data=cb("d", "v", poll_id, d["date"])) for d in days]
+    # A chosen range can run to a month; two to a row keeps that on one screen.
+    per_row = 1 if len(btns) <= 7 else 2
+    rows = [btns[i:i + per_row] for i in range(0, len(btns), per_row)]
     rows.append([B("🙅 No days work for me", callback_data=cb("d", "none", poll_id))])
     for day in days:
         if day["viable"]:
@@ -222,8 +293,9 @@ def dinner_finalize(poll_id: int, ranked: list[dict], admin_name: str,
 def dinner_finalize_none(poll_id: int, days: int, closed: bool) -> tuple[str, M]:
     head = ("😔 <b>Voting's closed and nobody picked a day.</b>" if closed
             else "😔 <b>Everyone's voted, but nobody can make any day.</b>")
+    nxt = "day" if days == 1 else f"{days} days"
     return (f"{head}\n\nTry the next stretch of days?",
-            M([[B(f"🔁 Try the next {days} days", callback_data=cb("d", "ext", poll_id))],
+            M([[B(f"🔁 Try the next {nxt}", callback_data=cb("d", "ext", poll_id))],
                [B("✖ Drop it for now", callback_data=cb("d", "drop", poll_id))]]))
 
 
