@@ -310,3 +310,39 @@ async def test_grace_period_lets_the_last_kid_finish_ticking(bot):
     assert sorted(free) == sorted(dates), "all five of Luke's picks were recorded"
     assigned = [s["assignee"] for s in roster.future_slots()]
     assert LUKE in assigned
+
+
+# --- seeing how far the roster runs, and extending it -----------------------
+
+def _hold(day, slug):
+    roster.ensure_slots([day])
+    roster.set_assignee(day, IDS[slug])
+
+
+async def test_a_round_started_by_hand_skips_sundays_already_covered(bot):
+    sundays = [d.isoformat() for d in t.next_sundays(8)]
+    _hold(sundays[0], "mark")
+    _hold(sundays[1], "dawn")
+
+    rid = await roster.start_round(bot)
+    rnd = db.q1("SELECT * FROM roster_rounds WHERE id = ?", (rid,))
+    assert roster.round_dates(rnd) == sundays[2:7]
+    # The board says why the first two are missing.
+    assert "already sorted" in bot.board
+    assert f"r|av|{rid}|{sundays[0]}" not in bot.callbacks()
+
+
+async def test_the_menu_shows_how_far_the_roster_runs(bot):
+    sundays = [d.isoformat() for d in t.next_sundays(3)]
+    for day, slug in zip(sundays, ["mark", "mark", "dawn"]):
+        _hold(day, slug)
+    await roster.entry(bot)
+    assert f"Covered up to {t.fmt_date(sundays[2])}" in bot.last
+    assert "➕ Plan more Sundays" in bot.buttons()
+
+
+async def test_view_shows_sundays_beyond_a_fortnight(bot):
+    far = t.next_sundays(4)[-1].isoformat()
+    _hold(far, "luke")
+    await roster.show_view(bot, IDS["mark"])
+    assert t.fmt_date(far) in bot.last

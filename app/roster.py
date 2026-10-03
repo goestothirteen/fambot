@@ -90,6 +90,24 @@ def has_roster() -> bool:
     return bool(db.scalar("SELECT COUNT(*) FROM roster_slots", default=0))
 
 
+def covered_sundays() -> list[dict]:
+    """Every future Sunday somebody already holds, soonest first."""
+    return [{"date": s["duty_date"], "name": db.name_of(s["assignee"])}
+            for s in future_slots() if s["assignee"] is not None]
+
+
+def next_open_sundays(count: int) -> list[str]:
+    """The next `count` Sundays nobody holds yet.
+
+    Covered Sundays are stepped over rather than asked about again, so a
+    round started by hand always breaks new ground: with the roster filled
+    to the 18th, it asks about the 25th onwards.
+    """
+    taken = {c["date"] for c in covered_sundays()}
+    sundays = [d.isoformat() for d in t.next_sundays(count + len(taken))]
+    return [d for d in sundays if d not in taken][:count]
+
+
 def ensure_slots(dates: list[str]) -> None:
     for day in dates:
         db.x("INSERT OR IGNORE INTO roster_slots (duty_date, status) "
@@ -124,7 +142,7 @@ async def render_round(bot: Bot, round_id: int) -> None:
     st = round_state(rnd)
     text, markup = boards.roster_round(
         rnd["id"], st["days"], st["responded"], [m["name"] for m in st["waiting"]],
-        t.parse_iso(rnd["deadline_at"]))
+        t.parse_iso(rnd["deadline_at"]), covered_sundays())
     chat_id = db.group_chat_id()
     if chat_id is None:
         return
@@ -148,8 +166,7 @@ async def start_round(bot: Bot, dates: list[str] | None = None) -> int | None:
         return None
 
     if dates is None:
-        horizon = db.get_int("roster_horizon")
-        dates = [d.isoformat() for d in t.next_sundays(horizon)]
+        dates = next_open_sundays(db.get_int("roster_horizon"))
     if not dates:
         return None
 
@@ -258,14 +275,16 @@ async def announce(bot: Bot) -> None:
 # --- entry point (📅 button / /roster) -------------------------------------
 
 async def entry(bot: Bot) -> None:
-    text, markup = boards.roster_menu(has_roster())
+    text, markup = boards.roster_menu(has_roster(), covered_sundays(),
+                                      db.get_int("roster_min_assigned"))
     await tg.send_group(bot, text, markup)
 
 
 async def show_view(bot: Bot, viewer_id: int) -> None:
     until = (t.today_local() + timedelta(days=14)).isoformat()
-    slots = db.q("SELECT * FROM roster_slots WHERE duty_date >= ? AND duty_date <= ? "
-                 "ORDER BY duty_date", (t.today_local().isoformat(), until))
+    # Every Sunday on the books, not just the next fortnight: a roster that
+    # appears to stop after two weeks looks like one that has been lost.
+    slots = future_slots()
     data = [{"date": s["duty_date"], "assignee": s["assignee"],
              "name": db.name_of(s["assignee"]) if s["assignee"] else None} for s in slots]
     helps = [{"kind": h["kind"], "req_date": h["req_date"],

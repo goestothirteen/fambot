@@ -524,18 +524,44 @@ def not_yours() -> str:
 
 # --- Feature C: roster ----------------------------------------------------
 
-def roster_menu(has_roster: bool) -> tuple[str, M]:
+def roster_menu(has_roster: bool, covered: list[dict] | None = None,
+                min_assigned: int = 3) -> tuple[str, M]:
+    """The roster at a glance, then the buttons.
+
+    `covered` items: {date, name} for every future Sunday somebody holds, so
+    nobody has to tap through to learn how far ahead the roster runs - or
+    wonder whether it has been lost when the last name is close.
+    """
+    lines = ["📅 <b>Roster</b>"]
+    if covered:
+        lines += ["", "<b>Sunday duty</b>"]
+        lines += [f"  {t.fmt_date(c['date'])} — {esc(c['name'])}" for c in covered]
+        lines += ["", f"<i>Covered up to {t.fmt_date(covered[-1]['date'])}. I ask "
+                      f"about the Sundays after that by myself once fewer than "
+                      f"{min_assigned} are covered — or tap ➕ to do it now.</i>"]
+    elif has_roster:
+        lines += ["", "⚠️ No Sunday has anyone on it right now. Tap ➕ to sort "
+                      "out the next few."]
+    else:
+        lines += ["", "No Sunday roster yet."]
     rows = [[B("👀 View roster", callback_data=cb("r", "view"))],
             [B("🏠 Ask someone to be home", callback_data=cb("h", "new", "cov"))]]
-    label = "⚙️ Set up the Sunday roster" if not has_roster else "⚙️ Re-run Sunday availability"
+    label = "⚙️ Set up the Sunday roster" if not has_roster else "➕ Plan more Sundays"
     rows.append([B(label, callback_data=cb("r", "setup"))])
-    return "📅 <b>Roster</b>\nWhat do you need?", M(rows)
+    return "\n".join(lines), M(rows)
 
 
 def roster_round(round_id: int, days: list[dict], responded: list[str],
-                 waiting: list[str], deadline) -> tuple[str, M]:
+                 waiting: list[str], deadline,
+                 covered: list[dict] | None = None) -> tuple[str, M]:
+    """`covered` items: {date, name} - Sundays already sorted, shown so it is
+    obvious why they are not being asked about again."""
     lines = ["📅 <b>SUNDAY DUTY — who's free?</b>",
              "Evenings after 6pm. Tap every Sunday you <b>can</b> do.", ""]
+    if covered:
+        lines += [f"✔ {t.fmt_date(c['date'])} — {esc(c['name'])} (already sorted)"
+                  for c in covered]
+        lines.append("")
     for day in days:
         who = ", ".join(esc(n) for n in day["names"]) or "nobody yet"
         lines.append(f"<b>{t.fmt_date(day['date'])}</b> — {who}")
