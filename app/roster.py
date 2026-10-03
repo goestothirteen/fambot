@@ -1,9 +1,9 @@
 """Feature C - the rolling Sunday roster.
 
-Rolling, not calendar-month (spec 7): the bot keeps the next five Sundays
-covered and tops up whenever fewer than three future Sundays have someone
-on them. That means the roster can start today instead of waiting for a
-month boundary.
+Rolling, not calendar-month (spec 7): a round covers the next five Sundays
+nobody holds yet, so the roster can start today instead of waiting for a
+month boundary. Rounds are only ever opened by a person, from /roster - the
+bot does not start one on its own.
 """
 from __future__ import annotations
 
@@ -275,8 +275,7 @@ async def announce(bot: Bot) -> None:
 # --- entry point (📅 button / /roster) -------------------------------------
 
 async def entry(bot: Bot) -> None:
-    text, markup = boards.roster_menu(has_roster(), covered_sundays(),
-                                      db.get_int("roster_min_assigned"))
+    text, markup = boards.roster_menu(has_roster(), covered_sundays())
     await tg.send_group(bot, text, markup)
 
 
@@ -462,32 +461,3 @@ async def _job_remind(bot: Bot, job) -> None:
     await tg.send_group(bot, boards.roster_reminder(
         slot["duty_date"], tg.mention_member(member),
         (job["payload"] or "sat") == "sat"))
-
-
-@scheduler.on("roster_topup")
-async def _job_topup(bot: Bot, job) -> None:
-    """Daily: keep at least `roster_min_assigned` future Sundays covered."""
-    schedule_topup()          # re-arm first, so a failure below still repeats
-    if open_round() is not None:
-        return
-    if assigned_future_count() >= db.get_int("roster_min_assigned"):
-        return
-    if not has_roster():
-        return                # roster never set up; wait for a human to start it
-    horizon = [d.isoformat() for d in t.next_sundays(db.get_int("roster_horizon"))]
-    taken = {r["duty_date"] for r in db.q(
-        "SELECT duty_date FROM roster_slots WHERE assignee IS NOT NULL")}
-    todo = [d for d in horizon if d not in taken]
-    if todo:
-        log.info("Roster top-up: opening a round for %s", todo)
-        await start_round(bot, todo)
-
-
-def schedule_topup() -> None:
-    hour = db.get_int("roster_topup_hour")
-    tomorrow = t.today_local() + timedelta(days=1)
-    when = t.local_at(t.today_local(), hour)
-    if when <= t.now_utc():
-        when = t.local_at(tomorrow, hour)
-    db.cancel_jobs("roster_topup")
-    db.add_job(when, "roster_topup", respect_quiet=False)

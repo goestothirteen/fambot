@@ -250,42 +250,17 @@ async def test_none_of_these_work_counts_as_answering(bot):
     assert "Dawn" not in [m["name"] for m in roster.round_state(rnd)["waiting"]]
 
 
-# --- auto top-up ----------------------------------------------------------
+# --- no auto top-up --------------------------------------------------------
 
-async def test_topup_fires_when_fewer_than_three_sundays_are_covered(bot):
-    sundays = [d.isoformat() for d in t.next_sundays(5)]
+async def test_the_bot_never_opens_a_round_by_itself(bot):
+    """Rounds start from /roster only; there is no daily check any more."""
+    assert "roster_topup" not in scheduler.HANDLERS
+    sundays = [d.isoformat() for d in t.next_sundays(1)]
     roster.ensure_slots(sundays)
-    roster.set_assignee(sundays[0], MARK)
-    roster.set_assignee(sundays[1], DAWN)
-    assert roster.assigned_future_count() == 2
-
-    job = db.q1("SELECT * FROM jobs WHERE kind='roster_topup'") or {"ref_id": None}
-    await scheduler.HANDLERS["roster_topup"](bot, job)
-    rnd = roster.open_round()
-    assert rnd is not None
-    # It only asks about the Sundays that still need somebody.
-    assert set(roster.round_dates(rnd)) == set(sundays[2:])
-
-
-async def test_topup_stays_quiet_when_three_are_covered(bot):
-    sundays = [d.isoformat() for d in t.next_sundays(5)]
-    roster.ensure_slots(sundays)
-    for day, uid in zip(sundays[:3], [MARK, DAWN, LUKE]):
-        roster.set_assignee(day, uid)
-    job = {"ref_id": None}
-    await scheduler.HANDLERS["roster_topup"](bot, job)
+    roster.set_assignee(sundays[0], IDS["mark"])
+    await settle(bot)
     assert roster.open_round() is None
-
-
-async def test_topup_rearms_itself_daily(bot):
-    await scheduler.HANDLERS["roster_topup"](bot, {"ref_id": None})
-    assert db.has_pending_job("roster_topup")
-
-
-async def test_topup_waits_for_a_human_to_start_the_roster(bot):
-    assert not roster.has_roster()
-    await scheduler.HANDLERS["roster_topup"](bot, {"ref_id": None})
-    assert roster.open_round() is None
+    assert not db.has_pending_job("roster_topup")
 
 
 async def test_grace_period_lets_the_last_kid_finish_ticking(bot):

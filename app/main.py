@@ -65,7 +65,6 @@ async def cmd_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                                          parse_mode="HTML")
     db.set_setting("registration_message_id", msg.message_id)
     await context.bot.send_message(chat.id, boards.help_text(), parse_mode="HTML")
-    roster.schedule_topup()
 
 
 async def cmd_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -207,8 +206,9 @@ async def post_init(app: Application) -> None:
         BotCommand("cancel", "Close anything open (admin)"),
     ])
     await _retire_reply_keyboard(app)
-    # Idempotent: keeps the daily top-up check armed across restarts.
-    roster.schedule_topup()
+    # Roster rounds are opened by hand now; drop any daily top-up check an
+    # older build left queued.
+    db.cancel_jobs("roster_topup")
     me = await app.bot.get_me()
     log.info("Fambot up as @%s | group=%s | %d member(s) registered",
              me.username, db.group_chat_id(), len(db.registered()))
