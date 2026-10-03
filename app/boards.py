@@ -67,7 +67,8 @@ def help_text() -> str:
         "a time, say whether you want company or someone to take the walk over, "
         "and it goes to the group.\n\n"
         f"<code>{C_ROSTER}</code> {L_ROSTER} — see who's on Sunday duty, ask "
-        "someone to be home, or set up the Sunday roster.\n\n"
+        "someone to be home, or plan more Sundays. Run it again any time — it "
+        "moves the same roster box down to you rather than posting another.\n\n"
         f"<code>{C_HELP}</code> {L_HELP} — this message."
     )
 
