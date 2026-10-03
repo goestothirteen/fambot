@@ -103,6 +103,9 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         db.x("UPDATE roster_rounds SET status = 'cancelled' WHERE id = ?", (rnd["id"],))
         db.cancel_jobs("roster_nag", rnd["id"])
         db.cancel_jobs("roster_deadline", rnd["id"])
+        db.cancel_jobs("roster_close", rnd["id"])
+        # Put the roster back in its box, or a dead vote keeps live buttons.
+        await roster.render_box(context.bot)
         closed.append("the Sunday availability round")
     for req in helpreq.open_requests():
         helpreq.cancel(req["id"], update.effective_user.id)

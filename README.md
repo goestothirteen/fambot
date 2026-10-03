@@ -20,7 +20,9 @@ responses → a human confirms the outcome → the bot reminds → dropouts reop
 - **🐕 Rush** (`/rush`) — dog-walk help. "Come along" is open to any kid; "take over the
   walk" needs a driver, because taking over means driving.
 - **📅 Roster** (`/roster`) — home cover on request, plus a rolling Sunday-evening roster
-  shared among the three kids by a fairness rule.
+  shared among the three kids by a fairness rule. Like dinner it lives in **one
+  message**: the availability vote, the result, chase-ups and duty reminders are that
+  same message, edited quietly or moved to the bottom when it has to ping.
 
 No LLM anywhere. Every tap gets the same instant, deterministic answer.
 
@@ -48,8 +50,8 @@ python -m pytest -q
    ("Fambot") and a free handle (e.g. `@h5fambot`). Copy the token into `.env`.
 2. `/setprivacy` → **Enable** (see **Privacy mode** below).
 3. Add the bot to the family group.
-4. Make it a **group admin** — otherwise it cannot pin the roster. Everything
-   else still works without admin; pinning just silently no-ops.
+4. Group admin is optional. Without it Telegram only lets the bot delete its own
+   messages for 48 hours; an older board is rewritten into a one-line pointer instead.
 5. Send `/setup` in the group. The bot stores the chat id and posts a
    registration card.
 6. Everyone taps their own name once. That is the only setup anyone has to do.

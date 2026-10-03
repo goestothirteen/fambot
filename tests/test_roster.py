@@ -125,22 +125,6 @@ async def test_round_closes_early_once_all_three_kids_answer(bot):
     assert assigned[dates[3]] is None
 
 
-async def test_closing_pins_the_roster(bot):
-    rid = await roster.start_round(bot)
-    dates = roster.round_dates(db.q1("SELECT * FROM roster_rounds WHERE id=?", (rid,)))
-    for slug, day in zip(["mark", "dawn", "luke"], dates):
-        await mark_free(bot, rid, slug, day)
-    await settle(bot)
-    assert bot.pinned
-    assert db.get_setting("roster_pin_message_id")
-
-
-async def test_repinning_unpins_the_previous_roster(bot):
-    db.set_setting("roster_pin_message_id", 777)
-    await roster.announce(bot)
-    assert 777 in bot.unpinned
-
-
 async def test_deadline_closes_the_round_and_assigns(bot):
     rid = await roster.start_round(bot)
     dates = roster.round_dates(db.q1("SELECT * FROM roster_rounds WHERE id=?", (rid,)))
@@ -238,7 +222,10 @@ async def test_nag_chases_only_the_silent_kids(bot):
     bot.reset()
     job = db.q1("SELECT * FROM jobs WHERE kind='roster_nag' AND ref_id=?", (rid,))
     await scheduler.HANDLERS["roster_nag"](bot, job)
-    assert "Dawn" in bot.last and "Luke" in bot.last and "Mark" not in bot.last
+    # The chase-up is the vote board moving, tagging only who it waits on.
+    assert len(bot.sent) == 1 and len(bot.deleted) == 1
+    assert f"tg://user?id={DAWN}" in bot.last and f"tg://user?id={LUKE}" in bot.last
+    assert f"tg://user?id={MARK}" not in bot.last
 
 
 async def test_none_of_these_work_counts_as_answering(bot):
@@ -319,5 +306,67 @@ async def test_the_menu_shows_how_far_the_roster_runs(bot):
 async def test_view_shows_sundays_beyond_a_fortnight(bot):
     far = t.next_sundays(4)[-1].isoformat()
     _hold(far, "luke")
-    await roster.show_view(bot, IDS["mark"])
+    await roster.entry(bot)
     assert t.fmt_date(far) in bot.last
+
+
+# --- one roster box --------------------------------------------------------
+
+def _box():
+    return int(db.get_setting("roster_box_message_id"))
+
+
+async def test_roster_again_moves_the_one_box_instead_of_posting_another(bot):
+    await roster.entry(bot)
+    first = _box()
+    await roster.entry(bot)
+    assert first in bot.deleted
+    assert len(bot.sent) == 2 and _box() == bot.sent[-1].message_id
+
+
+async def test_a_whole_round_lives_in_one_message(bot):
+    await roster.entry(bot)
+    await roster.on_callback(fake_update("r|setup", MARK), ctx(bot))
+    rid = roster.open_round()["id"]
+    dates = roster.round_dates(roster.open_round())
+    for slug, day in zip(["mark", "dawn", "luke"], dates):
+        await mark_free(bot, rid, slug, day)
+    await settle(bot)
+
+    # Menu, vote and result: three posts, two taken down, one left standing.
+    assert len(bot.sent) == 3 and len(bot.deleted) == 2
+    assert "Sundays shared out" in bot.last
+    assert "No cover for" in bot.last, "unfilled Sundays are flagged on the same box"
+
+
+async def test_ticking_sundays_edits_the_box_quietly(bot):
+    rid = await roster.start_round(bot)
+    dates = roster.round_dates(roster.open_round())
+    bot.reset()
+    await mark_free(bot, rid, "dawn", dates[0])
+    assert bot.sent == [] and bot.deleted == []
+    assert bot.edits[-1].message_id == _box()
+
+
+async def test_taking_a_sunday_is_a_quiet_edit_and_a_swap_is_a_move(bot):
+    day = t.next_sundays(1)[0].isoformat()
+    _hold(day, "mark")
+    await roster.entry(bot)
+    bot.reset()
+
+    await roster.on_callback(fake_update(f"r|swap|{day}", MARK), ctx(bot))
+    assert len(bot.sent) == 1 and len(bot.deleted) == 1
+    assert f"r|take|{day}" in bot.callbacks()
+
+    bot.reset()
+    await roster.on_callback(fake_update(f"r|take|{day}", LUKE), ctx(bot))
+    assert bot.sent == [] and "Luke has" in bot.edits[-1].text
+
+
+async def test_a_second_setup_tap_is_a_private_toast_not_a_message(bot):
+    await roster.start_round(bot)
+    bot.reset()
+    upd = fake_update("r|setup", DAWN)
+    await roster.on_callback(upd, ctx(bot))
+    assert "already" in upd.answers[-1]["text"]
+    assert bot.sent == [] and bot.edits == []

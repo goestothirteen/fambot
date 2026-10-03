@@ -124,7 +124,6 @@ async def test_a_week_in_the_life(bot, unregister_all):
     assert roster.open_round() is None, "round closed once everyone answered"
     slots = {s["duty_date"]: s["assignee"] for s in roster.future_slots()}
     assert all(v is not None for v in slots.values()), "every Sunday got somebody"
-    assert bot.pinned, "the roster was pinned"
 
     # Luke already did a coverage duty, so he should not be the busiest.
     counts = db.duty_counts()
