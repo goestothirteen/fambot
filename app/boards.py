@@ -524,39 +524,76 @@ def not_yours() -> str:
 
 # --- Feature C: roster ----------------------------------------------------
 
-def roster_menu(has_roster: bool,
-                covered: list[dict] | None = None) -> tuple[str, M]:
-    """The roster at a glance, then the buttons.
+# One box, same as dinner. The roster is a single message: the availability
+# vote while a round is running, the roster itself the rest of the time. It is
+# edited silently for small changes and taken down and re-posted only when
+# something has to reach phones (see roster.py).
 
-    `covered` items: {date, name} for every future Sunday somebody holds, so
-    nobody has to tap through to learn how far ahead the roster runs - or
-    wonder whether it has been lost when the last name is close.
+def roster_board_moved() -> str:
+    """Left in place of a roster box the bot was not allowed to delete."""
+    return "📅 <i>Roster moved to the bottom of the chat ⬇</i>"
+
+
+def roster_card(slots: list[dict], helps: list[dict], has_roster: bool,
+                headline: str | None = None) -> tuple[str, M]:
+    """The roster box when no round is running: who is on, and what to tap.
+
+    `slots` items: {date, name, assignee} for every future Sunday on the
+    books. `headline` is whatever just happened - a reminder, a swap request,
+    the result of a round - and sits on top so the re-posted box says why it
+    moved. An inline keyboard is shared by the whole group, so every held
+    Sunday gets its own swap button; the handler turns away anyone who taps
+    a Sunday that is not theirs.
     """
-    lines = ["📅 <b>Roster</b>"]
+    lines = [headline, ""] if headline else []
+    lines += ["📅 <b>Roster</b> — Sunday duty, evenings after 6pm", ""]
+    rows = []
+    covered = [s for s in slots if s["assignee"] is not None]
+    unfilled = [s["date"] for s in slots if s["assignee"] is None]
+    for s in slots:
+        who = esc(s["name"]) if s["name"] else "⚠️ nobody yet"
+        lines.append(f"<b>{t.fmt_date(s['date'])}</b> — {who}")
+    if unfilled:
+        lines += ["", "⚠️ No cover for " + plain_list([t.fmt_date(d) for d in unfilled])
+                  + ". Anyone able to step in?"]
+        rows += [[B(f"🙋 I'll take {t.fmt_date(d)}", callback_data=cb("r", "take", d))]
+                 for d in unfilled]
     if covered:
-        lines += ["", "<b>Sunday duty</b>"]
-        lines += [f"  {t.fmt_date(c['date'])} — {esc(c['name'])}" for c in covered]
         lines += ["", f"<i>Covered up to {t.fmt_date(covered[-1]['date'])}. "
                       "Tap ➕ to sort out the Sundays after that.</i>"]
+        rows += [[B(f"🔁 {s['name']} can't do {t.fmt_date(s['date'])}",
+                    callback_data=cb("r", "swap", s["date"]))] for s in covered]
     elif has_roster:
-        lines += ["", "⚠️ No Sunday has anyone on it right now. Tap ➕ to sort "
-                      "out the next few."]
+        lines += ["", "<i>No Sunday has anyone on it right now. Tap ➕ to sort "
+                      "out the next few.</i>"]
     else:
-        lines += ["", "No Sunday roster yet."]
-    rows = [[B("👀 View roster", callback_data=cb("r", "view"))],
-            [B("🏠 Ask someone to be home", callback_data=cb("h", "new", "cov"))]]
+        lines.append("No Sunday roster yet.")
+    if helps:
+        lines += ["", "<b>Help requests</b>"]
+        for h in helps:
+            icon = "🏠" if h["kind"] == "coverage" else "🐕"
+            who = esc(h["claimant"]) if h["claimant"] else "⚠️ nobody yet"
+            lines.append(f"  {icon} {t.fmt_date(h['req_date'])} "
+                         f"{t.window_label(h['time_window'])} — {who}")
+    rows.append([B("🏠 Ask someone to be home", callback_data=cb("h", "new", "cov"))])
     label = "⚙️ Set up the Sunday roster" if not has_roster else "➕ Plan more Sundays"
     rows.append([B(label, callback_data=cb("r", "setup"))])
     return "\n".join(lines), M(rows)
 
 
 def roster_round(round_id: int, days: list[dict], responded: list[str],
-                 waiting: list[str], deadline,
-                 covered: list[dict] | None = None) -> tuple[str, M]:
-    """`covered` items: {date, name} - Sundays already sorted, shown so it is
-    obvious why they are not being asked about again."""
-    lines = ["📅 <b>SUNDAY DUTY — who's free?</b>",
-             "Evenings after 6pm. Tap every Sunday you <b>can</b> do.", ""]
+                 waiting: str, deadline, covered: list[dict] | None = None,
+                 headline: str | None = None) -> tuple[str, M]:
+    """The roster box while an availability round is running.
+
+    `waiting` arrives as ready-made mention HTML, as on the dinner board: when
+    the box is re-posted to chase the kids who have not answered, the mentions
+    are what pings them. `covered` items: {date, name} - Sundays already
+    sorted, shown so it is obvious why they are not being asked about again.
+    """
+    lines = [headline, ""] if headline else []
+    lines += ["📅 <b>SUNDAY DUTY — who's free?</b>",
+              "Evenings after 6pm. Tap every Sunday you <b>can</b> do.", ""]
     if covered:
         lines += [f"✔ {t.fmt_date(c['date'])} — {esc(c['name'])} (already sorted)"
                   for c in covered]
@@ -568,7 +605,7 @@ def roster_round(round_id: int, days: list[dict], responded: list[str],
     if responded:
         lines.append("✅ Answered: " + plain_list([esc(n) for n in responded]))
     if waiting:
-        lines.append("⏳ Waiting on: " + plain_list([esc(n) for n in waiting]))
+        lines.append("⏳ Waiting on: " + waiting)
     lines += ["", f"<i>Closes {t.fmt_datetime(deadline)}, then I'll share it out fairly.</i>"]
 
     rows = [[B(f"{t.fmt_date(d['date'])}  ·  {d['count']} free",
@@ -578,43 +615,8 @@ def roster_round(round_id: int, days: list[dict], responded: list[str],
     return "\n".join(lines), M(rows)
 
 
-def roster_result(slots: list[dict], unfilled: list[str]) -> tuple[str, M]:
-    lines = ["📅 <b>SUNDAY ROSTER</b>", ""]
-    for s in slots:
-        who = esc(s["name"]) if s["name"] else "⚠️ nobody yet"
-        lines.append(f"<b>{t.fmt_date(s['date'])}</b> — {who}")
-    rows = [[B(f"🙋 I'll take {t.fmt_date(dd)}", callback_data=cb("r", "take", dd))]
-            for dd in unfilled]
-    if unfilled:
-        lines += ["", "⚠️ Still needs someone: "
-                  + plain_list([t.fmt_date(dd) for dd in unfilled])]
-    return "\n".join(lines), M(rows)
-
-
-def roster_view(slots: list[dict], helps: list[dict], viewer_id: int | None) -> tuple[str, M]:
-    lines = ["📅 <b>What's coming up</b>", ""]
-    rows = []
-    if slots:
-        lines.append("<b>Sunday duty</b>")
-        for s in slots:
-            who = esc(s["name"]) if s["name"] else "⚠️ nobody yet"
-            lines.append(f"  {t.fmt_date(s['date'])} — {who}")
-            if s["assignee"] is not None and s["assignee"] == viewer_id:
-                rows.append([B(f"🔁 I can't do {t.fmt_date(s['date'])}",
-                               callback_data=cb("r", "swap", s["date"]))])
-            if s["assignee"] is None:
-                rows.append([B(f"🙋 I'll take {t.fmt_date(s['date'])}",
-                               callback_data=cb("r", "take", s["date"]))])
-    else:
-        lines.append("No Sunday roster set up yet.")
-    if helps:
-        lines += ["", "<b>Help requests</b>"]
-        for h in helps:
-            icon = "🏠" if h["kind"] == "coverage" else "🐕"
-            who = esc(h["claimant"]) if h["claimant"] else "⚠️ nobody yet"
-            lines.append(f"  {icon} {t.fmt_date(h['req_date'])} "
-                         f"{t.window_label(h['time_window'])} — {who}")
-    return "\n".join(lines), M(rows)
+def roster_shared_out() -> str:
+    return "✅ <b>Sundays shared out.</b>"
 
 
 def roster_no_kids() -> str:
@@ -622,26 +624,13 @@ def roster_no_kids() -> str:
             "tap your names on the setup message first.")
 
 
-def roster_nag(mentions: str) -> str:
-    return f"📅 Still need Sunday availability from {mentions}!"
-
-
-def roster_unfilled_alert(dates: list[str]) -> tuple[str, M]:
-    lines = ["⚠️ <b>No cover for:</b>", ""]
-    lines += [f"  {t.fmt_date(dd)}" for dd in dates]
-    lines += ["", "Anyone able to step in?"]
-    rows = [[B(f"🙋 I'll take {t.fmt_date(dd)}", callback_data=cb("r", "take", dd))]
-            for dd in dates]
-    return "\n".join(lines), M(rows)
-
-
 def roster_taken(who: str, day: str) -> str:
-    return f"🙌 {who} has {t.fmt_date(day)} covered."
+    return f"🙌 {esc(who)} has {t.fmt_date(day)} covered."
 
 
-def roster_swap_open(who: str, day: str) -> tuple[str, M]:
-    return (f"🔁 {who} can't do Sunday duty on {t.fmt_date(day)}.\n\nAnyone able to swap in?",
-            M([[B(f"🙋 I'll take {t.fmt_date(day)}", callback_data=cb("r", "take", day))]]))
+def roster_swap_open(who: str, day: str) -> str:
+    return (f"🔁 <b>{esc(who)} can't do Sunday duty on {t.fmt_date(day)}.</b> "
+            "Anyone able to swap in?")
 
 
 def roster_reminder(day: str, mention_text: str, tomorrow: bool) -> str:
@@ -658,7 +647,7 @@ def roster_already_assigned(who: str) -> str:
 
 
 def roster_round_open() -> str:
-    return "There's already a Sunday availability round running — scroll up to it 📅"
+    return "There's already a Sunday availability round running 📅"
 
 
 def kids_only() -> str:
