@@ -36,11 +36,9 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "help_reping_hours": "6",
     "help_claimant_reminder_hour": "20",   # evening before
     # Roster
-    "roster_horizon": "5",          # Sundays kept in view
-    "roster_min_assigned": "3",     # below this, auto top-up fires
+    "roster_horizon": "5",          # Sundays asked about per round
     "roster_nag_hours": "12",
     "roster_deadline_hours": "48",
-    "roster_topup_hour": "10",
     # Grace period after the last kid answers, so someone mid-way through
     # ticking their Sundays is not cut off by their own first tap.
     "roster_close_grace_seconds": "120",

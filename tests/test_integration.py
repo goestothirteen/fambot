@@ -149,7 +149,6 @@ async def test_a_week_in_the_life(bot, unregister_all):
     assert db.q1("SELECT claimed_by FROM help_requests WHERE id=?",
                  (req["id"],))["claimed_by"] == ids["mark"]
     assert roster.assigned_future_count() >= 3
-    assert db.has_pending_job("roster_topup")
     assert db.scalar("SELECT COUNT(*) FROM jobs WHERE done=0") > 0
 
     # --- Saturday: Luke can't make it, so Mark moves the whole dinner -------

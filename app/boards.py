@@ -524,8 +524,8 @@ def not_yours() -> str:
 
 # --- Feature C: roster ----------------------------------------------------
 
-def roster_menu(has_roster: bool, covered: list[dict] | None = None,
-                min_assigned: int = 3) -> tuple[str, M]:
+def roster_menu(has_roster: bool,
+                covered: list[dict] | None = None) -> tuple[str, M]:
     """The roster at a glance, then the buttons.
 
     `covered` items: {date, name} for every future Sunday somebody holds, so
@@ -536,9 +536,8 @@ def roster_menu(has_roster: bool, covered: list[dict] | None = None,
     if covered:
         lines += ["", "<b>Sunday duty</b>"]
         lines += [f"  {t.fmt_date(c['date'])} — {esc(c['name'])}" for c in covered]
-        lines += ["", f"<i>Covered up to {t.fmt_date(covered[-1]['date'])}. I ask "
-                      f"about the Sundays after that by myself once fewer than "
-                      f"{min_assigned} are covered — or tap ➕ to do it now.</i>"]
+        lines += ["", f"<i>Covered up to {t.fmt_date(covered[-1]['date'])}. "
+                      "Tap ➕ to sort out the Sundays after that.</i>"]
     elif has_roster:
         lines += ["", "⚠️ No Sunday has anyone on it right now. Tap ➕ to sort "
                       "out the next few."]

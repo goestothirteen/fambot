@@ -142,7 +142,6 @@ from app import db; db.init(); db.set_setting('dinner_nag_hours', 8)"
 | `help_first_reping_hours` | `3` | First nudge on an unclaimed request |
 | `help_reping_hours` | `6` | Nudges after that |
 | `roster_horizon` | `5` | Sundays kept in view |
-| `roster_min_assigned` | `3` | Auto top-up fires below this |
 | `roster_close_grace_seconds` | `120` | Wait after the last kid answers |
 | `fairness_weeks` | `8` | Trailing window for counting duties |
 

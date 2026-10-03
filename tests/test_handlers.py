@@ -126,7 +126,7 @@ async def test_setup_stores_the_group_and_clears_any_old_keyboard(bot):
     assert "Fambot is set up" in sent[0][0]
     assert isinstance(sent[0][1], ReplyKeyboardRemove)
     assert bot.said("Tap your own name")
-    assert db.has_pending_job("roster_topup")
+    assert not db.has_pending_job("roster_topup")
 
 
 async def test_setup_is_refused_outside_a_group(bot):
